@@ -1,0 +1,18 @@
+&spi1 {
+    eth_lan9250: eth_lan9250@0 {
+        compatible = "microchip,lan9250";
+        spi-max-frequency = <30000000>; // SPI frequency
+        reg = <0>;
+        int-gpios = <&arduino_header 15 GPIO_ACTIVE_LOW>;
+        status = "okay";
+        local-mac-address = [ 80 34 28 01 02 05  ];
+    };
+};
+
+&mac {
+    status = "disabled";
+};
+
+&mdio {
+    status = "disabled";
+};
