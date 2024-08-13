@@ -1,0 +1,309 @@
+/* LAN9250 Stand-alone Ethernet Controller with SPI
+ *
+ * Copyright (c) 2024 Mario Paja
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
+
+#ifndef _LAN9250_
+#define _LAN9250_
+
+#define LAN9250_DEFAULT_NUMOF_RETRIES 3U
+#define LAN9250_PHY_TIMEOUT           2000
+#define LAN9250_MAC_TIMEOUT           2000
+#define LAN9250_RESET_TIMEOUT         5000
+
+#define LAN9250_ALIGN(v) (((v) + 3) & (~3))
+
+/* SPI instructions */
+#define LAN9250_SPI_INSTR_WRITE 0x02
+#define LAN9250_SPI_INSTR_READ  0x03
+
+/* TX command 'A' format */
+#define LAN9250_TX_CMD_A_INT_ON_COMP     0x80000000
+#define LAN9250_TX_CMD_A_BUFFER_ALIGN_4B 0x00000000
+#define LAN9250_TX_CMD_A_START_OFFSET_0B 0x00000000
+#define LAN9250_TX_CMD_A_FIRST_SEG       0x00002000
+#define LAN9250_TX_CMD_A_LAST_SEG        0x00001000
+
+/* TX command 'B' format */
+#define LAN9250_TX_CMD_B_PACKET_TAG 0xFFFF0000
+
+/* RX status format */
+#define LAN9250_RX_STS_PACKET_LEN 0x3FFF0000
+
+/* LAN9250 System registers */
+#define LAN9250_RX_DATA_FIFO   0x0000
+#define LAN9250_TX_DATA_FIFO   0x0020
+#define LAN9250_RX_STATUS_FIFO 0x0040
+#define LAN9250_TX_STATUS_FIFO 0x0048
+#define LAN9250_ID_REV         0x0050
+#define LAN9250_IRQ_CFG        0x0054
+#define LAN9250_INT_STS        0x0058
+#define LAN9250_INT_EN         0x005C
+#define LAN9250_BYTE_TEST      0x0064
+#define LAN9250_FIFO_INT       0x0068
+#define LAN9250_RX_CFG         0x006C
+#define LAN9250_TX_CFG         0x0070
+#define LAN9250_HW_CFG         0x0074
+#define LAN9250_RX_FIFO_INF    0x007C
+#define LAN9250_TX_FIFO_INF    0x0080
+#define LAN9250_PMT_CTRL       0x0084
+#define LAN9250_MAC_CSR_CMD    0x00A4
+#define LAN9250_MAC_CSR_DATA   0x00A8
+#define LAN9250_AFC_CFG        0x00AC
+#define LAN9250_RESET_CTL      0x01F8
+
+/* LAN9250 Host MAC registers */
+#define LAN9250_HMAC_CR       0x01
+#define LAN9250_HMAC_ADDRH    0x02
+#define LAN9250_HMAC_ADDRL    0x03
+#define LAN9250_HMAC_MII_ACC  0x06
+#define LAN9250_HMAC_MII_DATA 0x07
+
+/* LAN9250 PHY registers */
+#define LAN9250_PHY_BASIC_CONTROL            0x00
+#define LAN9250_PHY_AN_ADV                   0x04
+#define LAN9250_PHY_SPECIAL_MODES            0x12
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND 0x1B
+#define LAN9250_PHY_INTERRUPT_SOURCE         0x1D
+#define LAN9250_PHY_INTERRUPT_MASK           0x1E
+#define LAN9250_PHY_SPECIAL_CONTROL_STATUS   0x1F
+
+/* Interrupt Configuration register */
+#define LAN9250_IRQ_CFG_INT_DEAS_100US 0xA0000000
+#define LAN9250_IRQ_CFG_IRQ_EN         BIT(8)
+#define LAN9250_IRQ_CFG_IRQ_TYPE_PP    BIT(0)
+
+/* INTERRUPT STATUS REGISTER (INT_STS) */
+#define LAN9250_INT_STS_SW_INT       BIT(31)
+#define LAN9250_INT_STS_DEVICE_READY BIT(30)
+#define LAN9250_INT_STS_1588_EVNT    BIT(29)
+#define LAN9250_INT_STS_PHY_INT      BIT(26)
+#define LAN9250_INT_STS_TXSTOP_INT   BIT(25)
+#define LAN9250_INT_STS_RXSTOP_INT   BIT(24)
+#define LAN9250_INT_STS_RXDFH_INT    BIT(23)
+#define LAN9250_INT_STS_TX_IOC       BIT(21)
+#define LAN9250_INT_STS_RXD_INT      BIT(20)
+#define LAN9250_INT_STS_GPT_INT      BIT(19)
+#define LAN9250_INT_STS_PME_INT      BIT(17)
+#define LAN9250_INT_STS_TXSO         BIT(16)
+#define LAN9250_INT_STS_RWT          BIT(15)
+#define LAN9250_INT_STS_RXE          BIT(14)
+#define LAN9250_INT_STS_TXE          BIT(13)
+#define LAN9250_INT_STS_GPIO         BIT(12)
+#define LAN9250_INT_STS_TDFO         BIT(10)
+#define LAN9250_INT_STS_TDFA         BIT(9)
+#define LAN9250_INT_STS_TSFF         BIT(8)
+#define LAN9250_INT_STS_TSFL         BIT(7)
+#define LAN9250_INT_STS_RXDF_INT     BIT(6)
+#define LAN9250_INT_STS_RSFF         BIT(4)
+#define LAN9250_INT_STS_RSFL         BIT(3)
+
+/* INTERRUPT ENABLE REGISTER (INT_EN) */
+#define LAN9250_INT_EN_SW_INT_EN     BIT(31)
+#define LAN9250_INT_EN_READY_EN      BIT(30)
+#define LAN9250_INT_EN_1588_EVNT_EN  BIT(29)
+#define LAN9250_INT_EN_PHY_INT_EN    BIT(26)
+#define LAN9250_INT_EN_TXSTOP_INT_EN BIT(25)
+#define LAN9250_INT_EN_RXSTOP_INT_EN BIT(24)
+#define LAN9250_INT_EN_RXDFH_INT_EN  BIT(23)
+#define LAN9250_INT_EN_TIOC_INT_EN   BIT(21)
+#define LAN9250_INT_EN_RXD_INT_EN    BIT(20)
+#define LAN9250_INT_EN_GPT_INT_EN    BIT(19)
+#define LAN9250_INT_EN_PME_INT_EN    BIT(17)
+#define LAN9250_INT_EN_TXSO_EN       BIT(16)
+#define LAN9250_INT_EN_RWT_INT_EN    BIT(15)
+#define LAN9250_INT_EN_RXE_INT_EN    BIT(14)
+#define LAN9250_INT_EN_TXE_INT_EN    BIT(13)
+#define LAN9250_INT_EN_GPIO_EN       BIT(12)
+#define LAN9250_INT_EN_TDFO_EN       BIT(10)
+#define LAN9250_INT_EN_TDFA_EN       BIT(9)
+#define LAN9250_INT_EN_TSFF_EN       BIT(8)
+#define LAN9250_INT_EN_TSFL_EN       BIT(7)
+#define LAN9250_INT_EN_RXDF_INT_EN   BIT(6)
+#define LAN9250_INT_EN_RSFF_EN       BIT(4)
+#define LAN9250_INT_EN_RSFL_EN       BIT(3)
+
+/* Byte Order Test register */
+#define LAN9250_BYTE_TEST_DEFAULT 0x87654321
+#define BOTR_MASK                 0xffffffff
+
+/* FIFO Level Interrupt register */
+#define LAN9250_FIFO_INT_TX_DATA_AVAILABLE_LEVEL 0xFF000000
+#define LAN9250_FIFO_INT_TX_STATUS_LEVEL         0x00FF0000
+#define LAN9250_FIFO_INT_RX_STATUS_LEVEL         0x000000FF
+
+/* TRANSMIT CONFIGURATION REGISTER (TX_CFG) */
+#define LAN9250_TX_CFG_TXS_DUMP BIT(15)
+#define LAN9250_TX_CFG_TXD_DUMP BIT(14)
+#define LAN9250_TX_CFG_TXSAO    BIT(2)
+#define LAN9250_TX_CFG_TX_ON    BIT(1)
+#define LAN9250_TX_CFG_STOP_TX  BIT(0)
+
+/* HARDWARE CONFIGURATION REGISTER (HW_CFG) */
+#define LAN9250_HW_CFG_DEVICE_READY         BIT(27)
+#define LAN9250_HW_CFG_AMDIX_EN_STRAP_STATE BIT(25)
+#define LAN9250_HW_CFG_MBO                  BIT(20)
+#define LAN9250_HW_CFG_TX_FIF_SZ            0x000F0000
+#define LAN9250_HW_CFG_TX_FIF_SZ_2KB        0x00020000
+#define LAN9250_HW_CFG_TX_FIF_SZ_3KB        0x00030000
+#define LAN9250_HW_CFG_TX_FIF_SZ_4KB        0x00040000
+#define LAN9250_HW_CFG_TX_FIF_SZ_5KB        0x00050000
+#define LAN9250_HW_CFG_TX_FIF_SZ_6KB        0x00060000
+#define LAN9250_HW_CFG_TX_FIF_SZ_7KB        0x00070000
+#define LAN9250_HW_CFG_TX_FIF_SZ_8KB        0x00080000
+#define LAN9250_HW_CFG_TX_FIF_SZ_9KB        0x00090000
+#define LAN9250_HW_CFG_TX_FIF_SZ_10KB       0x000A0000
+#define LAN9250_HW_CFG_TX_FIF_SZ_11KB       0x000B0000
+#define LAN9250_HW_CFG_TX_FIF_SZ_12KB       0x000C0000
+#define LAN9250_HW_CFG_TX_FIF_SZ_13KB       0x000D0000
+#define LAN9250_HW_CFG_TX_FIF_SZ_14KB       0x000E0000
+
+/* RX FIFO Information register */
+#define LAN9250_RX_FIFO_INF_RXSUSED 0x00FF0000
+#define LAN9250_RX_FIFO_INF_RXDUSED 0x0000FFFF
+
+/* TX FIFO Information register */
+#define LAN9250_TX_FIFO_INF_TXSUSED 0x00FF0000
+#define LAN9250_TX_FIFO_INF_TXFREE  0x0000FFFF
+
+/* Power Management Control Register (PMT_CTRL) */
+#define LAN9250_PMT_CTRL_PM_SLEEP_EN       BIT(28)
+#define LAN9250_PMT_CTRL_PM_WAKE           BIT(27)
+#define LAN9250_PMT_CTRL_LED_DIS           BIT(26)
+#define LAN9250_PMT_CTRL_1588_DIS          BIT(25)
+#define LAN9250_PMT_CTRL_1588_TSU_DIS      BIT(22)
+#define LAN9250_PMT_CTRL_HMAC_DIS          BIT(19)
+#define LAN9250_PMT_CTRL_HMAC_SYS_ONLY_DIS BIT(18)
+#define LAN9250_PMT_CTRL_ED_STS            BIT(16)
+#define LAN9250_PMT_CTRL_ED_EN             BIT(14)
+#define LAN9250_PMT_CTRL_WOL_EN            BIT(9)
+#define LAN9250_PMT_CTRL_PME_TYPE          BIT(6)
+#define LAN9250_PMT_CTRL_WOL_STS           BIT(5)
+#define LAN9250_PMT_CTRL_PME_IND           BIT(3)
+#define LAN9250_PMT_CTRL_PME_POL           BIT(2)
+#define LAN9250_PMT_CTRL_PME_EN            BIT(1)
+#define LAN9250_PMT_CTRL_READY             BIT(0)
+
+/* HOST MAC CSR INTERFACE COMMAND REGISTER (MAC_CSR_CMD) */
+#define LAN9250_MAC_CSR_CMD_BUSY  BIT(31)
+#define LAN9250_MAC_CSR_CMD_READ  BIT(30)
+
+/* Reset Control Register (RESET_CTL) */
+#define LAN9250_RESET_CTL_HMAC_RST    BIT(5)
+#define LAN9250_RESET_CTL_PHY_RST     BIT(1)
+#define LAN9250_RESET_CTL_DIGITAL_RST BIT(0)
+
+/* HOST MAC CONTROL REGISTER (HMAC_CR) */
+#define LAN9250_HMAC_CR_RXALL           BIT(31)
+#define LAN9250_HMAC_CR_HMAC_EEE_ENABLE BIT(25)
+#define LAN9250_HMAC_CR_RCVOWN          BIT(23)
+#define LAN9250_HMAC_CR_LOOPBK          BIT(21)
+#define LAN9250_HMAC_CR_FDPX            BIT(20)
+#define LAN9250_HMAC_CR_MCPAS           BIT(19)
+#define LAN9250_HMAC_CR_PRMS            BIT(18)
+#define LAN9250_HMAC_CR_INVFILT         BIT(17)
+#define LAN9250_HMAC_CR_PASSBAD         BIT(16)
+#define LAN9250_HMAC_CR_HO              BIT(15)
+#define LAN9250_HMAC_CR_HPFILT          BIT(13)
+#define LAN9250_HMAC_CR_BCAST           BIT(11)
+#define LAN9250_HMAC_CR_DISRTY          BIT(10)
+#define LAN9250_HMAC_CR_PADSTR          BIT(8)
+#define LAN9250_HMAC_CR_DFCHK           BIT(5)
+#define LAN9250_HMAC_CR_TXEN            BIT(3)
+#define LAN9250_HMAC_CR_RXEN            BIT(2)
+
+/* HOST MAC MII ACCESS REGISTER (HMAC_MII_ACC) */
+#define LAN9250_HMAC_MII_ACC_MIIW_R           BIT(1)
+#define LAN9250_HMAC_MII_ACC_MIIBZY           BIT(0)
+
+/* PHY Basic Control Register (PHY_BASIC_CONTROL) */
+#define LAN9250_PHY_BASIC_CONTROL_PHY_SRST          BIT(15)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_LOOPBACK      BIT(14)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_SPEED_SEL_LSB BIT(13)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_AN            BIT(12)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_PWR_DWN       BIT(11)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_RST_AN        BIT(9)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_DUPLEX        BIT(8)
+#define LAN9250_PHY_BASIC_CONTROL_PHY_COL_TEST      BIT(7)
+
+/* PHY Auto-Negotiation Advertisement Register (PHY_AN_ADV) */
+#define LAN9250_PHY_AN_ADV_NEXT_PAGE          BIT(15)
+#define LAN9250_PHY_AN_ADV_REMOTE_FAULT       BIT(13)
+#define LAN9250_PHY_AN_ADV_EXTENDED_NEXT_PAGE BIT(12)
+#define LAN9250_PHY_AN_ADV_ASYM_PAUSE         BIT(11)
+#define LAN9250_PHY_AN_ADV_SYM_PAUSE          BIT(10)
+#define LAN9250_PHY_AN_ADV_100BTX_FD          BIT(8)
+#define LAN9250_PHY_AN_ADV_100BTX_HD          BIT(7)
+#define LAN9250_PHY_AN_ADV_10BT_FD            BIT(6)
+#define LAN9250_PHY_AN_ADV_10BT_HD            BIT(5)
+#define LAN9250_PHY_AN_ADV_SELECTOR_DEFAULT   BIT(1)
+
+/* PHY Mode Control/Status Register (PHY_MODE_CONTROL_STATUS) */
+#define LAN9250_PHY_MODE_CONTROL_STATUS_EDPWRDOWN BIT(13)
+#define LAN9250_PHY_MODE_CONTROL_STATUS_ALTINT    BIT(6)
+#define LAN9250_PHY_MODE_CONTROL_STATUS_ENERGYON  BIT(1)
+
+/* PHY Special Control/Status Indication Register (PHY_SPECIAL_CONTROL_STAT_IND) */
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_AMDIXCTRL  BIT(15)
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_AMDIXEN    BIT(14)
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_AMDIXSTATE BIT(13)
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_SQEOFF     BIT(11)
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_FEFI_EN    BIT(5)
+#define LAN9250_PHY_SPECIAL_CONTROL_STAT_IND_XPOL       BIT(4)
+
+/* PHY Interrupt Source Flags Register (PHY_INTERRUPT_SOURCE) */
+#define LAN9250_PHY_INTERRUPT_SOURCE_LINK_UP               BIT(9)
+#define LAN9250_PHY_INTERRUPT_SOURCE_ENERGYON              BIT(7)
+#define LAN9250_PHY_INTERRUPT_SOURCE_AN_COMPLETE           BIT(6)
+#define LAN9250_PHY_INTERRUPT_SOURCE_REMOTE_FAULT          BIT(5)
+#define LAN9250_PHY_INTERRUPT_SOURCE_LINK_DOWN             BIT(4)
+#define LAN9250_PHY_INTERRUPT_SOURCE_AN_LP_ACK             BIT(3)
+#define LAN9250_PHY_INTERRUPT_SOURCE_PARALLEL_DETECT_FAULT BIT(2)
+#define LAN9250_PHY_INTERRUPT_SOURCE_AN_PAGE_RECEIVED      BIT(1)
+
+/* PHY Interrupt Mask Register (PHY_INTERRUPT_MASK) */
+#define LAN9250_PHY_INTERRUPT_MASK_LINK_UP               BIT(9)
+#define LAN9250_PHY_INTERRUPT_MASK_ENERGYON              BIT(7)
+#define LAN9250_PHY_INTERRUPT_MASK_AN_COMPLETE           BIT(6)
+#define LAN9250_PHY_INTERRUPT_MASK_REMOTE_FAULT          BIT(5)
+#define LAN9250_PHY_INTERRUPT_MASK_LINK_DOWN             BIT(4)
+#define LAN9250_PHY_INTERRUPT_MASK_AN_LP_ACK             BIT(3)
+#define LAN9250_PHY_INTERRUPT_MASK_PARALLEL_DETECT_FAULT BIT(2)
+#define LAN9250_PHY_INTERRUPT_MASK_AN_PAGE_RECEIVED      BIT(1)
+
+// Chip ID and Revision register
+#define LAN9250_ID_REV_CHIP_ID         0xFFFF0000
+#define LAN9250_ID_REV_CHIP_ID_DEFAULT 0x92500000
+#define LAN9250_ID_REV_CHIP_REV        0x0000FFFF
+
+struct lan9250_config {
+	struct spi_dt_spec spi;
+	struct gpio_dt_spec interrupt;
+	struct gpio_dt_spec reset;
+	uint8_t full_duplex;
+	int32_t timeout;
+};
+
+struct lan9250_runtime {
+	struct net_if *iface;
+	const struct device *dev;
+
+	K_KERNEL_STACK_MEMBER(thread_stack, CONFIG_ETH_LAN9250_RX_THREAD_STACK_SIZE);
+	k_tid_t tid_int;
+	struct k_thread thread;
+
+	uint8_t mac_address[6];
+	struct gpio_callback gpio_cb;
+	struct k_sem tx_rx_sem;
+	struct k_sem int_sem;
+	uint8_t buf[NET_ETH_MAX_FRAME_SIZE];
+	struct k_mutex lock;
+};
+
+#endif /*_LAN9250_*/
