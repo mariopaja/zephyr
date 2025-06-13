@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2025 Mario Paja
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <espressif/esp32s3/esp32s3_r2.dtsi>
+#include "esp32s3_lcd_1_47-pinctrl.dtsi"
+#include <zephyr/dt-bindings/display/panel.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <espressif/partitions_0x0_amp_16M.dtsi>
+
+/ {
+	model = "ESP32-S3-LCD-1.47 PROCPU";
+	compatible = "waveshare,esp32-s3-lcd-1.47";
+
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+	};
+};
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};
+
+&usb_serial {
+	status = "okay";
+};
