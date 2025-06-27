@@ -783,7 +783,8 @@ static DEVICE_API(i2s, i2s_stm32_driver_api) = {
 		.dma_cfg =                                                                         \
 			{                                                                          \
 				.dma_slot = STM32_DMA_SLOT(index, dir, slot),                      \
-				.channel_direction = src_dev##_TO_##dest_dev,                      \
+				.channel_direction = STM32_DMA_CONFIG_DIRECTION(                   \
+					STM32_DMA_CHANNEL_CONFIG(index, dir)),                     \
 				.dma_callback = dma_callback,                                      \
 			},                                                                         \
 		.stream_start = stream_start,                                                      \

@@ -29,5 +29,6 @@
 	status = "okay";
 	mclk-enable;
 	mclk-divider = "div-256";
+	dmas = <&gpdma1 1 36 STM32_DMA_PERIPH_TX>;
 	dma-names = "tx";
 };

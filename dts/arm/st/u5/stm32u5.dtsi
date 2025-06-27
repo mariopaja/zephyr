@@ -4,6 +4,8 @@
  * Copyright (c) 2023 PSICONTROL nv
  * Copyright (c) 2024 STMicroelectronics
  * Copyright (c) 2025 Harris Tomy
+ * Copyright (c) 2025 ZAL Zentrum für Angewandte Luftfahrtforschung GmbH
+ * Copyright (c) 2025 Mario Paja
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -475,9 +477,8 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <0x40015404 0x20>;
-			clocks = <&rcc STM32_CLOCK(APB2, 21U)>,
-					 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
-			dmas = <&gpdma1 1 36 0>;
+			clocks = <&rcc STM32_CLOCK(APB2, 21)>,
+				 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
 			status = "disabled";
 		};
 
@@ -486,9 +487,8 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <0x40015424 0x20>;
-			clocks = <&rcc STM32_CLOCK(APB2, 21U)>,
-					 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
-			dmas = <&gpdma1 0 37 0>;
+			clocks = <&rcc STM32_CLOCK(APB2, 21)>,
+				 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
 			status = "disabled";
 		};
 
