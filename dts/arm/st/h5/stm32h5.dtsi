@@ -658,6 +658,30 @@
 			status = "disabled";
 		};
 
+		sai2_a: sai2@40015804 {
+			compatible = "st,stm32-sai";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0x40015804 0x20>;
+			clocks = <&rcc STM32_CLOCK(APB2, 22)>,
+				 <&rcc STM32_SRC_PLL2_P SAI2_SEL(0)>;
+			dmas = <&gpdma1 3 55 (STM32_DMA_MODE_NORMAL | STM32_DMA_PRIORITY_HIGH |
+				STM32_DMA_16BITS)>;
+			status = "disabled";
+		};
+
+		sai2_b: sai2@40015824 {
+			compatible = "st,stm32-sai";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0x40015824 0x20>;
+			clocks = <&rcc STM32_CLOCK(APB2, 22)>,
+				 <&rcc STM32_SRC_PLL2_P SAI2_SEL(0)>;
+			dmas = <&gpdma1 2 56 (STM32_DMA_MODE_NORMAL | STM32_DMA_PRIORITY_HIGH |
+				STM32_DMA_16BITS)>;
+			status = "disabled";
+		};
+
 		usb: usb@40016000 {
 			compatible = "st,stm32-usb";
 			reg = <0x40016000 0x400>;
