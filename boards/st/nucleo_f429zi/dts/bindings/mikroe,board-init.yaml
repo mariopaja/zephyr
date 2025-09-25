@@ -1,0 +1,17 @@
+
+description: MCU Card 4 for STM32
+
+compatible: "mikroe,board-init"
+
+include: "pinctrl-device.yaml"
+
+properties:
+  
+  usb-psw-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIOs for USB power switch control.
+      LOW logic level (0) : USB HOST
+      HIGH logic level (1): USB DEVICE
+

@@ -3,12 +3,19 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(main, 4);
 
+#include <zephyr/kernel.h>
 #include <stdio.h>
 
 int main(void)
 {
-	printf("Hello World! %s\n", CONFIG_BOARD_TARGET);
+
+	while (1) {
+		LOG_INF("Hello World! %s", CONFIG_BOARD_TARGET);
+		k_msleep(1000);
+	}
 
 	return 0;
 }
