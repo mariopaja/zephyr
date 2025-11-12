@@ -29,6 +29,11 @@ enum mclk_divider {
 	MCLK_DIV_512
 };
 
+enum sai_mode {
+	SAI_MODE_I2S,
+	SAI_MODE_PDM
+};
+
 struct queue_item {
 	void *buffer;
 	size_t size;
@@ -73,6 +78,8 @@ struct i2s_stm32_sai_cfg {
 	bool mclk_enable;
 	enum mclk_divider mclk_div;
 	bool synchronous;
+
+	enum sai_mode mode;
 };
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
@@ -429,7 +436,13 @@ static int i2s_stm32_sai_configure(const struct device *dev, enum i2s_dir dir,
 	if (dir == I2S_DIR_RX) {
 		hsai->Init.AudioMode = SAI_MODEMASTER_RX;
 
-		if (stream->master == false) {
+		if (cfg->mode == SAI_MODE_PDM) {
+			hsai->Init.PdmInit.Activation = ENABLE;
+			hsai->Init.PdmInit.MicPairsNbr = 1; //TODO
+			hsai->Init.PdmInit.ClockEnable = SAI_PDM_CLOCK1_ENABLE; //TODO
+		}
+
+		if (cfg->mode == SAI_MODE_I2S && stream->master == false) {
 			hsai->Init.AudioMode = SAI_MODESLAVE_RX;
 			if (cfg->synchronous) {
 				hsai->Init.Synchro = SAI_SYNCHRONOUS;
@@ -809,6 +822,11 @@ static DEVICE_API(i2s, i2s_stm32_driver_api) = {
 	.read = i2s_stm32_sai_read,
 };
 
+#define SAI_MODE(index)                                                                            \
+	((DT_INST_NODE_HAS_PROP(index, st_sai_pdm) && DT_INST_DMAS_HAS_NAME(index, rx))            \
+		 ? (enum sai_mode)DT_ENUM_IDX(DT_DRV_INST(index), st_sai_mode)                     \
+		 : SAI_MODE_I2S)
+
 #define SAI_DMA_CHANNEL_INIT(index, dir, src_dev, dest_dev)                                        \
 	.stream = {                                                                                \
 		.dma_dev = DEVICE_DT_GET(STM32_DMA_CTLR(index, dir)),                              \
@@ -832,15 +850,14 @@ static DEVICE_API(i2s, i2s_stm32_driver_api) = {
 	static const struct stm32_pclken clk_##index[] = STM32_DT_INST_CLOCKS(index);              \
                                                                                                    \
 	struct i2s_stm32_sai_data sai_data_##index = {                                             \
-		.hsai =                                                                            \
-			{                                                                          \
-				.Instance = (SAI_Block_TypeDef *)DT_INST_REG_ADDR(index),          \
-				.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE,                       \
-				.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_FULL,                      \
-				.Init.SynchroExt = SAI_SYNCEXT_DISABLE,                            \
-				.Init.CompandingMode = SAI_NOCOMPANDING,                           \
-				.Init.TriState = SAI_OUTPUT_NOTRELEASED,                           \
-			},                                                                         \
+		.hsai = {                                                                          \
+			.Instance = (SAI_Block_TypeDef *)DT_INST_REG_ADDR(index),          \
+			.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE,                       \
+			.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_FULL,                      \
+			.Init.SynchroExt = SAI_SYNCEXT_DISABLE,                            \
+			.Init.CompandingMode = SAI_NOCOMPANDING,                           \
+			.Init.TriState = SAI_OUTPUT_NOTRELEASED,                           \
+		},                                                                         \
 		COND_CODE_1(DT_INST_DMAS_HAS_NAME(index, tx),                                     \
 			(SAI_DMA_CHANNEL_INIT(index, tx, MEMORY, PERIPHERAL)),                  \
 		(SAI_DMA_CHANNEL_INIT(index, rx, PERIPHERAL, MEMORY)))};                     \
@@ -853,6 +870,7 @@ static DEVICE_API(i2s, i2s_stm32_driver_api) = {
 		.mclk_enable = DT_INST_PROP(index, mclk_enable),                                   \
 		.mclk_div = (enum mclk_divider)DT_ENUM_IDX(DT_DRV_INST(index), mclk_divider),      \
 		.synchronous = DT_INST_PROP(index, synchronous),                                   \
+		.mode = SAI_MODE(index),                                                           \
 	};                                                                                         \
                                                                                                    \
 	DEVICE_DT_INST_DEFINE(index, &i2s_stm32_sai_initialize, NULL, &sai_data_##index,           \
