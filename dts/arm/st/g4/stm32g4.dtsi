@@ -724,6 +724,7 @@
 			#size-cells = <0>;
 			reg = <0x40015404 0x20>;
 			clocks = <&rcc STM32_CLOCK(APB2, 21)>;
+			st,sai-pdm;
 			dmas = <&dma1 1 108 (STM32_DMA_MODE_NORMAL | STM32_DMA_PRIORITY_HIGH |
 				STM32_DMA_16BITS)>;
 			status = "disabled";

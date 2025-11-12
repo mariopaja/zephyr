@@ -129,6 +129,7 @@
 			reg = <0x40015404 0x20>;
 			clocks = <&rcc STM32_CLOCK(APB2, 21)>,
 				 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
+			st,sai-pdm;
 			dmas = <&gpdma1 1 53 (STM32_DMA_MODE_NORMAL | STM32_DMA_PRIORITY_HIGH |
 				STM32_DMA_16BITS)>;
 			status = "disabled";
