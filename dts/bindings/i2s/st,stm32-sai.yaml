@@ -54,3 +54,52 @@ properties:
     description: |
       Synchronous mode.
       When present, the SAI controller is configured to work in synchronous mode.
+
+  st,sai-pdm:
+    type: boolean
+    description: |
+      When present, the SAI controller supports PDM (Pulse Density Modulation).
+
+  st,sai-mode:
+    type: string
+    default: "i2s"
+    description: |
+      This property is only applicable for SAI instances that support PDM.
+      Selects the operating mode of the SAI block. 
+
+      - i2s: Standard I2S (Inter-IC Sound) mode.
+      - pdm: PDM (Pulse Density Modulation) mode, typically used for dmic input.
+
+      If not specified, the mode defaults to i2s.
+    enum:
+      - "i2s"
+      - "pdm"
+
+  st,sai-pdm-mic-pairs:
+    type: int
+    default: 1
+    description: |
+      This property is only applicable for SAI instances that support PDM.
+      Defines the number of PDM microphone pairs connected to the SAI block.
+      Each pair consists of two microphones sharing the same data line.
+
+      Valid values:
+        - 1: Two microphones (one pair)
+        - 2: Four microphones (two pairs)
+        - 3: Six microphones (three pairs)
+
+      If not specified, the default value is 1.
+    enum:
+      - 1
+      - 2
+      - 3
+
+  st,sai-pdm-ck:
+    type: int
+    default: 1
+    description: |
+      This property is only applicable for SAI instances that support PDM.
+      Selects the PDM clock output configuration (SAI_CKx) for the SAI block.
+    enum:
+      - 1
+      - 2
