@@ -15,11 +15,14 @@
 	compatible = "arduino,giga-r1";
 
 	chosen {
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
 		zephyr,bt-hci = &bt_hci_uart;
+		zephyr,canbus = &fdcan2;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,canbus = &fdcan2;
 		zephyr,code-partition = &slot0_partition;
+		zephyr,canbus = &fdcan2;
 	};
 
 	sdram1: sdram@c0000000 {
@@ -30,10 +33,19 @@
 		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_RAM)>;
 	};
 
+	ext_memory: memory@90000000 {
+		compatible = "zephyr,memory-region";
+		reg = <0x90000000 DT_SIZE_M(16)>; /* 128 Mbits */
+		zephyr,memory-region = "EXTMEM";
+		/* The ATTR_MPU_EXTMEM attribute causing a MPU FAULT */
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_IO)>;
+	};
+
 	aliases {
 		led0 = &red_led;
 		led1 = &green_led;
 		sw0 = &user_button;
+		spi-flash0 = &n25q128a;
 	};
 };
 
@@ -150,16 +162,17 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		boot_partition: partition@0 {
-			label = "bootloader";
-			reg = <0x0 0x40000>;
-			read-only;
-		};
-
-		slot0_partition: partition@40000 {
-			label = "image-0";
-			reg = <0x40000 0x000c0000>;
-		};
+        /* Bootloader slot: 128KB */
+        boot_partition: partition@0 {
+            label = "mcuboot";
+            reg = <0x00000000 DT_SIZE_K(128)>;
+            read-only;
+        };
+        /* Application slot: 896KB */
+        slot0_partition: partition@20000 {
+            label = "image-0";
+            reg = <0x00020000 DT_SIZE_K(896)>;
+        };
 	};
 };
 
@@ -170,16 +183,39 @@
 	pinctrl-names = "default";
 	status = "okay";
 
-	qspi_flash: n25q128a1: qspi-nor-flash@0 {
+	n25q128a: qspi-nor-flash@0 {
 		compatible = "st,stm32-qspi-nor";
 		reg = <0>;
 		size = <DT_SIZE_M(128)>; /* 128 Mbits (16 MB) */
 		qspi-max-frequency = <72000000>;
 		cs-high-time = <4>; /* >= 50 ns */
 		status = "okay";
+
+        partitions {
+            compatible = "fixed-partitions";
+            #address-cells = <1>;
+            #size-cells = <1>;
+
+            /* Update slot: 896 KB */
+            slot1_partition: partition@0 {
+                label = "image-1";
+                reg = <0x00000000 DT_SIZE_K(896)>;
+            };
+
+            /* Scratch slot: 128 KB */
+            scratch_partition: partition@E0000 {
+                label = "image-scratch";
+                reg = <0x000E0000 DT_SIZE_K(128)>;
+            };
+
+            /* Storage: remainder (~14 MB) */
+            storage_partition: partition@100000 {
+                label = "storage";
+                reg = <0x00100000 DT_SIZE_M(14)>;
+            };
+        };
 	};
 };
-#include <arduino/partitions_qspi_h7.dtsi>
 
 &rng {
 	status = "okay";
@@ -233,9 +269,13 @@ zephyr_udc0: &usbotg_fs {
 	status = "okay";
 	pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
 	pinctrl-names = "default";
+	
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "Zephyr USB CDC-ACM";
+		status = "okay";
+	};
 };
-
-#include <../boards/common/usb/cdc_acm_serial.dtsi>
 
 /* alias used by display shields */
 zephyr_mipi_dsi: &mipi_dsi {};
