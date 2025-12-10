@@ -66,6 +66,51 @@ static int wm8904_protocol_config(const struct device *dev, audio_dai_type_t dai
 	return 0;
 }
 
+typedef struct {
+	int val;
+	float multiplier;
+} fs_entry_t;
+
+fs_entry_t fs_table[] = {
+	{0b0000, 1.0},  /* fs = 1.0 * 64 */ 
+	{0b0001, 2.0},  /* fs = 2.0 * 64 */
+	{0b0010, 3.0},  /* fs = 3.0 * 64 */
+	{0b0011, 4.0},  /* fs = 4.0 * 64 */
+	{0b0100, 6.0},  /* fs = 6.0 * 64 */
+	{0b0101, 8.0},  /* fs = 8.0 * 64 */
+	{0b0110, 12.0}, /* fs = 12.0 * 64 */
+	{0b0111, 16.0}, /* fs = 16.0 * 64 */
+	{0b1000, 22.0}, /* fs = 22.0 * 64 */
+	{0b1001, 24.0}, /* fs = 24.0 * 64 */
+};
+
+static int wm8904_fs_ratio(const struct device *dev, audio_dai_cfg_t *cfg, uint32_t mclk)
+{
+	uint32_t fs;
+	uint16_t mclkDiv;
+
+	int best_fs = -1;
+	int best_error = 1e6;
+	int calculated_fs = 0;
+	int calculated_error = 0;
+
+	wm8904_read_reg(dev, WM8904_REG_CLK_RATES_0, &mclkDiv);
+	fs = (mclk >> (mclkDiv & 0x1U)) / cfg->i2s.frame_clk_freq;
+
+	for (int i = 0; i < 10; i++) {
+		calculated_fs = fs_table[i].multiplier * 64;
+		calculated_error =
+			(calculated_fs > fs) ? (calculated_fs - fs) : (fs - calculated_fs);
+
+		if (calculated_error < best_error) {
+			best_error = calculated_error;
+			best_fs = fs_table[i].val;
+		}
+	}
+
+	return best_fs;
+}
+
 static int wm8904_audio_fmt_config(const struct device *dev, audio_dai_cfg_t *cfg, uint32_t mclk)
 {
 	wm8904_sample_rate_t wm_sample_rate;
@@ -101,44 +146,7 @@ static int wm8904_audio_fmt_config(const struct device *dev, audio_dai_cfg_t *cf
 		return -EINVAL;
 	}
 
-	wm8904_read_reg(dev, WM8904_REG_CLK_RATES_0, &mclkDiv);
-	fs = (mclk >> (mclkDiv & 0x1U)) / cfg->i2s.frame_clk_freq;
-
-	switch (fs) {
-	case 64:
-		wmfs_ratio = kWM8904_FsRatio64X;
-		break;
-	case 128:
-		wmfs_ratio = kWM8904_FsRatio128X;
-		break;
-	case 192:
-		wmfs_ratio = kWM8904_FsRatio192X;
-		break;
-	case 256:
-		wmfs_ratio = kWM8904_FsRatio256X;
-		break;
-	case 384:
-		wmfs_ratio = kWM8904_FsRatio384X;
-		break;
-	case 512:
-		wmfs_ratio = kWM8904_FsRatio512X;
-		break;
-	case 768:
-		wmfs_ratio = kWM8904_FsRatio768X;
-		break;
-	case 1024:
-		wmfs_ratio = kWM8904_FsRatio1024X;
-		break;
-	case 1408:
-		wmfs_ratio = kWM8904_FsRatio1408X;
-		break;
-	case 1536:
-		wmfs_ratio = kWM8904_FsRatio1536X;
-		break;
-	default:
-		LOG_WRN("Invalid Fs ratio: %d", fs);
-		return -EINVAL;
-	}
+	wmfs_ratio = wm8904_fs_ratio(dev, cfg, mclk);
 
 	/* Disable SYSCLK */
 	wm8904_write_reg(dev, WM8904_REG_CLK_RATES_2, 0x00);
