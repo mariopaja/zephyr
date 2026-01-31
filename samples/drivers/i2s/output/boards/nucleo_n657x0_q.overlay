@@ -11,17 +11,23 @@
 };
 
 &pll2 {
-	clocks = <&clk_hse>;
-	div-m = <3>;
-	mul-n = <79>;
+	clocks = <&clk_hsi>;
+	div-m = <2>;
+	mul-n = <48>;
 	div-p1 = <1>;
 	div-p2 = <1>;
 	status = "okay";
 };
 
+/*
+ * f_IC7 = f_PLL2 / IC7_div
+ *	 = 1.536 GHz / 125
+ *	 = 12.288 MHz
+ *	 = 256 * 48 kHz
+ */
 &ic7 {
 	pll-src = <2>;
-	ic-div = <28>;
+	ic-div = <125>;
 	status = "okay";
 };
 
@@ -40,4 +46,8 @@
 	mclk-enable;
 	mclk-divider = "div-256";
 	dma-names = "tx";
+};
+
+&i2c4 {
+	status = "disabled";
 };
