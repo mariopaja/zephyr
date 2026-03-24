@@ -54,3 +54,14 @@ properties:
     description: |
       Synchronous mode.
       When present, the SAI controller is configured to work in synchronous mode.
+
+  sai-fifo-threshold:
+    type: string
+    default: "empty"
+    description: SAI Block Fifo Threshold
+    enum:
+      - "empty"
+      - "quarter"
+      - "half"
+      - "three-quarters"
+      - "full"
