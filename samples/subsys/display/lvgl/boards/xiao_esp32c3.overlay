@@ -1,0 +1,64 @@
+#include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
+
+/ {
+	chosen {
+		zephyr,display = &nv3030b;
+	};
+
+	mipi_dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		spi-dev = <&spi2>;
+        reset-gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
+		dc-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+
+		write-only;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		nv3030b: nv3030b@0 {
+			compatible = "nvu,nv3030b";
+			mipi-max-frequency = <10000000>;
+			reg = <0>;
+			width = <240>;
+			height = <280>;
+			x-offset = <0>;
+			y-offset = <20>;
+			
+			
+			colmod = <0x05>;
+			lcm = <0x2c>;
+			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+            /*NV3030B*/
+			dvdd-param = [07 04];
+			bias-param = [00 44 45];
+			vgl-param = [41 07 12 12];
+			vgh-param = [37];
+			vsp-param = [09 10 21];
+			vsn-param = [09 10 21];
+			pump-ck-param = [20 40];
+			gam-ref1-param = [90 4c 7c 66];
+			frate-param = [0f 02 01];
+            dpolctrl = <0x01>;
+			porch-param = [02 02 0A 14];
+            dfunc-param = [04 01 9f 00 02];
+            gamma = <0x11>;
+            gam-p3-param = [13 00 00 30 33 3f];
+            gam-n3-param = [3f 33 30 00 00 13];
+            gam-p2-param = [00 57];
+            gam-n2-param = [58 00];
+            gam-p1-param = [01 03 0e 0e 0c 0c 15 19];
+            gam-n1-param = [1a 16 0c 0f 0e 0d 02 01];
+            src1-param = [00 ff];
+            src2-param = [01 04 03 03 00 12];
+            src3-param = [00 70 00];
+            gate-timing = <0x52>;
+            tear-param = [01 01 02];
+            iface-param = [09 10 00 00];
+            mdac = <0x08>;
+		};
+	};
+};
+
+&spi2 {
+    cs-gpios=<&gpio0 4 GPIO_ACTIVE_LOW>;
+};

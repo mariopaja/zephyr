@@ -1,0 +1,175 @@
+# Copyright (c) 2026 Mario Paja
+# SPDX-License-Identifier: Apache-2.0
+
+title: Shanghai NewVision Microelectronics NV3030B display controller
+
+description: |
+    The NV3030B is a 262K-color (18-bit) a-Si TFT-LCD controller/driver
+    with an internal GRAM supporting up to 240RGB x 320 resolution.
+
+compatible: "nvu,nv3030b"
+
+include: [mipi-dbi-spi-device.yaml, display-controller.yaml]
+
+properties:
+  x-offset:
+    type: int
+    required: true
+    description: The column offset in pixels of the LCD to the controller memory
+
+  y-offset:
+    type: int
+    required: true
+    description: The row offset in pixels of the LCD to the controller memory
+
+  mdac:
+    type: int
+    required: true
+    description: Memory Data Access Control
+
+  lcm:
+    type: int
+    required: true
+    description: LCM Setting
+
+  colmod:
+    type: int
+    required: true
+    description: Interface Pixel Format
+
+  gamma:
+    type: int
+    required: true
+    description: Gamma Setting
+
+  inversion-off:
+    type: boolean
+    description: Inversion Off
+
+  porch-param:
+    type: uint8-array
+    required: true
+    description: Porch Setting
+
+  dvdd-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  bias-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  vgl-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  vgh-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  vsp-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  vsn-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  pump-ck-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  pump-ck-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-ref1-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  frate-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  dpolctrl:
+    type: int
+    required: true
+    description: Gamma Setting
+
+  dfunc-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-p3-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-n3-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-p2-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-n2-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-p1-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gam-n1-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  src1-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  src2-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  src3-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  gate-timing:
+    type: int
+    required: true
+    description: Gamma Setting
+
+  tear-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter
+
+  iface-param:
+    type: uint8-array
+    required: true
+    description: Power Control 1 Parameter  
+
+  mipi-mode:
+    required: true
