@@ -292,6 +292,48 @@ static int lan9250_hw_cfg_check(const struct device *dev)
 
 	return 0;
 }
+static int lan9250_1588_clock_set(const struct device *dev, struct net_ptp_time *tm);
+static int lan9250_1588_clock_adjust(const struct device *dev, int increment);
+static int lan9250_1588_clock_rate_adjust(const struct device *dev, double ratio);
+
+static int lan9250_1588_clock_get(const struct device *dev, struct net_ptp_time *tm)
+{
+	uint32_t tmp;
+	unsigned int key;
+
+	key = irq_lock();
+
+	int ret = lan9250_read_sys_reg(dev, LAN9250_1588_CMD_CTL, &tmp);
+
+	tmp |= (LAN9250_1588_CLOCK_READ);
+
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_CMD_CTL, tmp);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = lan9250_read_sys_reg(dev, LAN9250_1588_CLOCK_SEC, tm->second);
+	if (ret < 0) {
+		return ret;
+	}
+	LOG_ERR("LAN9250_1588_CLOCK_SEC: 0x%x", tm->second);
+
+	ret = lan9250_read_sys_reg(dev, LAN9250_1588_CLOCK_NS, tm->nanosecond);
+	if (ret < 0) {
+		return ret;
+	}
+
+	LOG_ERR("LAN9250_1588_CLOCK_NS: 0x%x", tm->nanosecond);
+	irq_unlock(key);
+
+	return 0;
+}
+
+const struct device *lan9250_1588_clock_dev(const struct device *dev)
+{
+	/* Device generates the clock */
+	return dev;
+}
 
 static int lan9250_sw_reset(const struct device *dev)
 {
@@ -308,6 +350,26 @@ static int lan9250_sw_reset(const struct device *dev)
 	return lan9250_wait_ready(dev, LAN9250_BYTE_TEST, BOTR_MASK, LAN9250_BYTE_TEST_DEFAULT,
 				  LAN9250_RESET_TIMEOUT);
 }
+
+#if !defined(CONFIG_ETH_LAN9250_PTP_CLOCK)
+static int lan9250_1588_clk_disable(const struct device *dev)
+{
+	uint32_t tmp;
+	int ret;
+
+	ret = lan9250_read_sys_reg(dev, LAN9250_PMT_CTRL, &tmp);
+
+	tmp |= (LAN9250_PMT_CTRL_1588_DIS | LAN9250_PMT_CTRL_1588_TSU_DIS);
+
+	/* In order for this bit to be set, it must be written as a 1 two consecutive times. */
+	ret = lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL, tmp);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL, tmp);
+}
+#endif
 
 static int lan9250_configure(const struct device *dev)
 {
@@ -399,19 +461,29 @@ static int lan9250_configure(const struct device *dev)
 	/* Configure remote power management:
 	 *
 	 *   - Auto wakeup
-	 *   - Disable 1588 clock
-	 *   - Disable 1588 timestamp unit clock
 	 *   - Energy-detect
 	 *   - Wake on
 	 *   - Clear wakeon
 	 */
 	ret = lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL,
-				    LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_1588_DIS |
-					    LAN9250_PMT_CTRL_1588_TSU_DIS |
-					    LAN9250_PMT_CTRL_WOL_EN | LAN9250_PMT_CTRL_WOL_STS);
+				    LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_WOL_EN |
+					    LAN9250_PMT_CTRL_WOL_STS);
 	if (ret < 0) {
 		return ret;
 	}
+
+#ifndef CONFIG_PTP_CLOCK
+
+	/* Configure remote power management:
+	 *
+	 *   - Disable 1588 clock
+	 *   - Disable 1588 timestamp unit clock
+	 */
+	ret = lan9250_1588_clk_disable(dev);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
 
 	/* Configure PHY basic control:
 	 *
@@ -530,12 +602,32 @@ static int lan9250_configure(const struct device *dev)
 	}
 #endif
 
+	/* Configure 1588:
+	 *
+	 *   - Enable 1588
+	 */
+#if defined(CONFIG_ETH_LAN9250_PTP_CLOCK)
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_CMD_CTL, LAN9250_1588_ENABLE);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
 	/* Configure TX:
 	 *
 	 *   - TX enable
 	 */
 	return lan9250_write_sys_reg(dev, LAN9250_TX_CFG, LAN9250_TX_CFG_TX_ON);
 }
+
+#if defined(CONFIG_ETH_LAN9250_PTP_CLOCK)
+static const struct device *lan9250_get_ptp_clock(const struct device *dev)
+{
+	struct lan9250_runtime *ctx = dev->data;
+
+	return ctx->ptp_clock;
+}
+#endif
 
 static int lan9250_write_buf(const struct device *dev, uint8_t *data_buffer, uint16_t buf_len)
 {
@@ -877,6 +969,9 @@ static const struct ethernet_api api_funcs = {
 	.get_capabilities = lan9250_get_capabilities,
 	.set_config = lan9250_set_config,
 	.send = lan9250_tx,
+#if defined(CONFIG_ETH_LAN9250_PTP_CLOCK)
+	.get_ptp_clock = lan9250_1588_clock_dev,
+#endif
 };
 
 static int lan9250_init(const struct device *dev)

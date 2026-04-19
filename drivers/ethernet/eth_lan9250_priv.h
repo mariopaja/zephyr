@@ -8,6 +8,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
+#if defined(CONFIG_ETH_LAN9250_PTP_CLOCK)
+#include <zephyr/drivers/ptp_clock.h>
+#include <zephyr/net/gptp.h>
+#endif
+
 
 #ifndef _LAN9250_
 #define _LAN9250_
@@ -56,7 +61,28 @@
 #define LAN9250_MAC_CSR_CMD    0x00A4
 #define LAN9250_MAC_CSR_DATA   0x00A8
 #define LAN9250_AFC_CFG        0x00AC
+#define LAN9250_1588_CMD_CTL   0X0100
+#define LAN9250_1588_GNRL_CFG  0X0104
+#define LAN9250_1588_CLOCK_SEC 0X0110
+#define LAN9250_1588_CLOCK_NS 0X0114
 #define LAN9250_RESET_CTL      0x01F8
+
+/* LAN9250 1588 Registers */
+#define LAN9250_1588_CLOCK_TARGET_READ         0x00002000  /* Bit 13 */
+#define LAN9250_1588_MANUAL_CAPTURE            0x00000100  /* Bit 8  */
+#define LAN9250_1588_CLOCK_TEMP_RATE           0x00000080  /* Bit 7  */
+#define LAN9250_1588_CLOCK_STEP_NANOSECONDS    0x00000040  /* Bit 6  */
+#define LAN9250_1588_CLOCK_STEP_SECONDS        0x00000020  /* Bit 5  */
+#define LAN9250_1588_CLOCK_LOAD                0x00000010  /* Bit 4  */
+#define LAN9250_1588_CLOCK_READ                0x00000008  /* Bit 3  */
+#define LAN9250_1588_ENABLE                    0x00000004  /* Bit 2  */
+#define LAN9250_1588_DISABLE                   0x00000002  /* Bit 1  */
+#define LAN9250_1588_RESET                     0x00000001  /* Bit 0  */
+
+/* GPIO Select Field (Bits 12:9) */
+#define LAN9250_1588_GPIO_SEL_MASK             0x00001E00
+#define LAN9250_1588_GPIO_SEL_SHIFT            9
+#define LAN9250_1588_GPIO_SEL(x)               (((x) << 9) & LAN9250_1588_GPIO_SEL_MASK)
 
 /* LAN9250 Host MAC registers */
 #define LAN9250_HMAC_CR       0x01

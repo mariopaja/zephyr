@@ -37,4 +37,11 @@ config ETH_LAN9250_BUF_ALLOC_TIMEOUT
 	  that the driver will wait from the IP stack to get
 	  a memory buffer before the Ethernet frame is dropped.
 
+config ETH_LAN9250_PTP_CLOCK
+	bool "PTP clock driver support"
+	depends on PTP_CLOCK
+	default y
+	help
+	  Enable PTP clock support FOR LAN9250.
+
 endif
