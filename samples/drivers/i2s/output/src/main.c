@@ -126,6 +126,16 @@ int main(void)
 		printf("Could not trigger I2S tx\n");
 		return ret;
 	}
+
+	int64_t start = k_uptime_get();
+
+	while (i2s_get_state(dev_i2s) != I2S_STATE_READY) {
+		__NOP();
+	}
+
+	int64_t elapsed = k_uptime_get() - start;
+	printf("Drain time: %lld ms\n", elapsed);
+
 	printf("All I2S blocks written\n");
 	return 0;
 }

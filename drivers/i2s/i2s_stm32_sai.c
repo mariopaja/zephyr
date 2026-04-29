@@ -931,11 +931,20 @@ static int i2s_stm32_sai_trigger(const struct device *dev, enum i2s_dir dir,
 	return 0;
 }
 
+static enum i2s_state i2s_stm32_sai_state(const struct device *dev)
+{
+	struct i2s_stm32_sai_data *dev_data = dev->data;
+	struct stream *stream = &dev_data->stream;
+
+	return stream->state;
+}
+
 static DEVICE_API(i2s, i2s_stm32_driver_api) = {
 	.configure = i2s_stm32_sai_configure,
 	.trigger = i2s_stm32_sai_trigger,
 	.write = i2s_stm32_sai_write,
 	.read = i2s_stm32_sai_read,
+	.get_state = i2s_stm32_sai_state,
 };
 
 #define SAI_DMA_CHANNEL_INIT(index, dir, src, dest)                                                \
