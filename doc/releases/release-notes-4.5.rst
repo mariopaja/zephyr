@@ -133,6 +133,7 @@ New APIs and options
 * Audio
 
   * :c:member:`pcm_stream_cfg.gain_db`
+  * :c:struct:`audio_codec_eq_cfg`
 
 * Bluetooth
 
