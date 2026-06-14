@@ -554,6 +554,38 @@ static void wm8904_stop_output(const struct device *dev)
 {
 }
 
+static inline uint16_t wm8904_eq_gain_encode(int32_t gain)
+{
+	return (uint16_t)(gain - WM8904_EQ_MIN_GAIN);
+}
+
+static int wm8904_eq_config(const struct device *dev, uint32_t band, int32_t gain)
+{
+	int ret = -EINVAL;
+
+	if (gain < WM8904_EQ_MIN_GAIN || gain > WM8904_EQ_MAX_GAIN) {
+		LOG_ERR("Invalid EQ gain: %d dB (valid range: %d to %d)", (int)gain,
+			WM8904_EQ_MIN_GAIN, WM8904_EQ_MAX_GAIN);
+	} else {
+		for (size_t i = 0U; i < ARRAY_SIZE(wm8904_eq_band_regs); i++) {
+			if (wm8904_eq_band_regs[i].band == band) {
+				uint16_t encoded = wm8904_eq_gain_encode(gain);
+
+				LOG_DBG("EQ band %u (%u Hz) gain: %d dB, hex: 0x%04X",
+					(unsigned int)(i + 1U), band, (int)gain, encoded);
+				wm8904_write_reg(dev, wm8904_eq_band_regs[i].reg, encoded);
+				ret = 0;
+				break;
+			}
+		}
+		if (ret != 0) {
+			LOG_ERR("Invalid EQ band: %u Hz", band);
+		}
+	}
+
+	return ret;
+}
+
 static int wm8904_set_property(const struct device *dev, audio_property_t property,
 			       audio_channel_t channel, audio_property_value_t val)
 {
@@ -569,6 +601,12 @@ static int wm8904_set_property(const struct device *dev, audio_property_t proper
 
 	case AUDIO_PROPERTY_INPUT_MUTE:
 		return wm8904_in_mute_config(dev, channel, val.mute);
+
+	case AUDIO_PROPERTY_EQ_GAIN: {
+		struct audio_codec_eq_cfg *eq = &val.eq;
+
+		return wm8904_eq_config(dev, eq->band, eq->gain);
+	}
 	}
 
 	return -EINVAL;
@@ -659,6 +697,9 @@ static void wm8904_configure_output(const struct device *dev)
 {
 	wm8904_out_volume_config(dev, AUDIO_CHANNEL_ALL, WM8904_OUTPUT_VOLUME_DEFAULT);
 	wm8904_out_mute_config(dev, AUDIO_CHANNEL_ALL, false);
+
+	/* Enable EQ; all bands default to 0 dB. */
+	wm8904_write_reg(dev, WM8904_REG_EQ_ENA, 0x0001);
 
 	wm8904_apply_properties(dev);
 }
