@@ -306,6 +306,14 @@ static void wm8904_in_pga_config(const struct device *dev)
 {
 	const struct wm8904_driver_config *const dev_cfg = DEV_CFG(dev);
 
+	/* ADCL_ENA=1, ADCR_ENA=1 */
+	wm8904_update_reg(dev, WM8904_REG_POWER_MGMT_6, 0x00FU, 0x000FU);
+
+	k_msleep(10);
+
+	/* INL_ENA=1, INR ENA=1 */
+	wm8904_write_reg(dev, WM8904_REG_POWER_MGMT_0, 0x0003);
+
 	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_LEFT, dev_cfg->in_pga_sel);
 	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_RIGHT, dev_cfg->in_pga_sel);
 
@@ -489,46 +497,12 @@ static int wm8904_configure(const struct device *dev, struct audio_codec_cfg *cf
 		wm8904_write_reg(dev, WM8904_REG_MIC_BIAS_CONTROL_0, 0x0001);
 	}
 
-	/* INL_ENA=1, INR ENA=1 */
-	wm8904_write_reg(dev, WM8904_REG_POWER_MGMT_0, 0x0003);
-
-	/* HPL_PGA_ENA=1, HPR_PGA_ENA=1 */
-	wm8904_write_reg(dev, WM8904_REG_POWER_MGMT_2, 0x0003);
-
-	/* DACL_ENA=1, DACR_ENA=1, ADCL_ENA=1, ADCR_ENA=1 */
-	wm8904_write_reg(dev, WM8904_REG_POWER_MGMT_6, 0x000F);
-
-	/* ADC_OSR128=1 */
-	wm8904_write_reg(dev, WM8904_REG_ANALOG_ADC_0, 0x0001);
-
-	/* DACL_DATINV=0, DACR_DATINV=0, DAC_BOOST=00, LOOPBACK=0, AIFADCL_SRC=0,
-	 * AIFADCR_SRC=1, AIFDACL_SRC=0, AIFDACR_SRC=1, ADC_COMP=0, ADC_COMPMODE=0,
-	 * DAC_COMP=0, DAC_COMPMODE=0
-	 */
-	wm8904_write_reg(dev, WM8904_REG_AUDIO_IF_0, 0x0050);
-
 	/* DAC_MONO=0, DAC_SB_FILT-0, DAC_MUTERATE=0, DAC_UNMUTE RAMP=0,
 	 * DAC_OSR128=1, DAC_MUTE=0, DEEMPH=0 (none)
 	 */
 	wm8904_write_reg(dev, WM8904_REG_DAC_DIG_1, 0x0040);
 
-	/* Enable DC servos for headphone out */
-	wm8904_write_reg(dev, WM8904_REG_DC_SERVO_0, 0x0003);
-
-	/* HPL_RMV_SHORT=1, HPL_ENA_OUTP=1, HPL_ENA_DLY=1, HPL_ENA=1,
-	 * HPR_RMV_SHORT=1, HPR_ENA_OUTP=1, HPR_ENA_DLY=1, HPR_ENA=1
-	 */
-	wm8904_write_reg(dev, WM8904_REG_ANALOG_HP_0, 0x00FF);
-
-	/* CP_DYN_PWR=1 */
-	wm8904_write_reg(dev, WM8904_REG_CLS_W_0, 0x0001);
-
-	/* CP_ENA=1 */
-	wm8904_write_reg(dev, WM8904_REG_CHRG_PUMP_0, 0x0001);
-
 	wm8904_protocol_config(dev, cfg->dai_type);
-	wm8904_update_reg(dev, WM8904_REG_CLK_RATES_2, (uint16_t)(1UL << 14U),
-			  (uint16_t)(dev_cfg->clock_source));
 
 	if (dev_cfg->clock_source == 0) {
 		LOG_DBG("MCLK selected as clock source");
