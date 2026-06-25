@@ -121,7 +121,13 @@ struct stm32_sai_sub_cfg {
 };
 
 struct stm32_sai_cfg {
-	const struct stm32_pclken *pclken;
+	const struct stm32_pclken sai_ck;
+	const struct stm32_pclken sai_ker_ck;
+	const struct stm32_pclken sai_a_ker_ck;
+	const struct stm32_pclken sai_b_ker_ck;
+	bool has_sai_ker_ck: 1;
+	bool has_sai_a_ker_ck: 1;
+	bool has_sai_b_ker_ck: 1;
 	size_t pclk_len;
 };
 
@@ -282,19 +288,41 @@ static int stm32_sai_clock_en(const struct device *dev)
 {
 	const struct stm32_sai_cfg *sai_cfg = dev->config;
 	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+	struct stm32_pclken sai_ck = sai_cfg->sai_ck;
 	int ret;
 
 	/* Turn on SAI peripheral clock */
-	ret = clock_control_on(clk, (clock_control_subsys_t)&sai_cfg->pclken[0]);
+	ret = clock_control_on(clk, (clock_control_subsys_t)&sai_ck);
 	if (ret != 0) {
 		return -EIO;
 	}
 
-	if (sai_cfg->pclk_len > 1) {
-		/* Enable SAI clock source */
-		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_cfg->pclken[1],
-					      NULL);
-		if (ret < 0) {
+	/* Configure Shared Kernel Clock */
+	if (sai_cfg->has_sai_ker_ck) {
+		struct stm32_pclken sai_ker_ck = sai_cfg->sai_ker_ck;
+
+		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_ker_ck, NULL);
+		if (ret != 0) {
+			return -EIO;
+		}
+	}
+
+	/* Configure SAI A Kernel Clock */
+	if (!sai_cfg->has_sai_ker_ck && sai_cfg->has_sai_a_ker_ck) {
+		struct stm32_pclken sai_a_ker_ck = sai_cfg->sai_a_ker_ck;
+
+		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_a_ker_ck, NULL);
+		if (ret != 0) {
+			return -EIO;
+		}
+	}
+
+	/* Configure SAI B Kernel Clock */
+	if (!sai_cfg->has_sai_ker_ck && sai_cfg->has_sai_b_ker_ck) {
+		struct stm32_pclken sai_b_ker_ck = sai_cfg->sai_b_ker_ck;
+
+		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_b_ker_ck, NULL);
+		if (ret != 0) {
 			return -EIO;
 		}
 	}
@@ -483,8 +511,13 @@ static int stm32_sai_sub_f4_clk_src_conf(const struct device *dev)
 	SAI_HandleTypeDef *hsai = &sub_data->hsai;
 	uint32_t clock_source = 0U;
 
-	if (sai_cfg->pclk_len > 1) {
-		clock_source = sai_cfg->pclken[1].bus;
+	if (sai_cfg->has_sai_a_ker_ck || sai_cfg->has_sai_b_ker_ck) {
+		LOG_ERR("STM32F4xx supports only shared kernel clock");
+		return -EIO;
+	}
+
+	if (sai_cfg->has_sai_ker_ck) {
+		clock_source = sai_cfg->sai_ker_ck.bus;
 	}
 
 	switch (clock_source) {
@@ -1055,15 +1088,25 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 			 POST_KERNEL, CONFIG_I2S_INIT_PRIORITY, &i2s_stm32_sai_api);               \
 	K_MSGQ_DEFINE(queue_##node, sizeof(struct queue_item), CONFIG_I2S_STM32_SAI_BLOCK_COUNT, 4);
 
+#define SAI_KER_CK_FIELD_INIT(inst, name)                                                          \
+	COND_CODE_1(DT_INST_CLOCKS_HAS_NAME(inst, name),                                           \
+		(.name = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, name), .has_##name = true,),       \
+		(.has_##name = false,))
+
+#define SAI_KER_CK_INIT(inst)                                                                      \
+	SAI_KER_CK_FIELD_INIT(inst, sai_ker_ck)                                                    \
+	SAI_KER_CK_FIELD_INIT(inst, sai_a_ker_ck)                                                  \
+	SAI_KER_CK_FIELD_INIT(inst, sai_b_ker_ck)
+
 /* Controller Node */
 #define SAI_INIT(inst)                                                                             \
-	static const struct stm32_pclken clk_##inst[] = STM32_DT_INST_CLOCKS(inst);                \
 	static const struct stm32_sai_cfg sai_cfg_##inst = {                                       \
-		.pclken = clk_##inst,                                                              \
 		.pclk_len = DT_INST_NUM_CLOCKS(inst),                                              \
-	};                                                                                         \
+		.sai_ck = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_ck),                          \
+		SAI_KER_CK_INIT(inst)};                                                            \
 	DEVICE_DT_INST_DEFINE(inst, &sai_init, NULL, NULL, &sai_cfg_##inst, POST_KERNEL,           \
 			      CONFIG_I2S_INIT_PRIORITY, NULL);                                     \
+                                                                                                   \
 	DT_INST_FOREACH_CHILD_STATUS_OKAY(inst, SAI_SUB_INIT)
 
 DT_INST_FOREACH_STATUS_OKAY(SAI_INIT)
