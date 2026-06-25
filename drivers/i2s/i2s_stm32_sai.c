@@ -121,7 +121,10 @@ struct stm32_sai_sub_cfg {
 };
 
 struct stm32_sai_cfg {
-	const struct stm32_pclken *pclken;
+	const struct stm32_pclken pclken;
+	const struct stm32_pclken sai_a_pclken;
+	const struct stm32_pclken sai_b_pclken;
+	bool has_shared_sai_ker_ck: 1;
 	size_t pclk_len;
 };
 
@@ -282,19 +285,26 @@ static int stm32_sai_clock_en(const struct device *dev)
 {
 	const struct stm32_sai_cfg *sai_cfg = dev->config;
 	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+	struct stm32_pclken pclken = sai_cfg->pclken;
+	struct stm32_pclken sai_a_pclken = sai_cfg->sai_a_pclken;
 	int ret;
 
 	/* Turn on SAI peripheral clock */
-	ret = clock_control_on(clk, (clock_control_subsys_t)&sai_cfg->pclken[0]);
+	ret = clock_control_on(clk, (clock_control_subsys_t)&pclken);
 	if (ret != 0) {
 		return -EIO;
 	}
 
-	if (sai_cfg->pclk_len > 1) {
-		/* Enable SAI clock source */
-		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_cfg->pclken[1],
-					      NULL);
-		if (ret < 0) {
+	ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_a_pclken, NULL);
+	if (ret != 0) {
+		return -EIO;
+	}
+
+	if (!sai_cfg->has_shared_sai_ker_ck) {
+		struct stm32_pclken sai_b_pclken = sai_cfg->sai_b_pclken;
+
+		ret = clock_control_configure(clk, (clock_control_subsys_t)&sai_b_pclken, NULL);
+		if (ret != 0) {
 			return -EIO;
 		}
 	}
@@ -481,11 +491,9 @@ static int stm32_sai_sub_f4_clk_src_conf(const struct device *dev)
 	const struct stm32_sai_cfg *sai_cfg = sub_cfg->controller->config;
 	struct stm32_sai_sub_data *sub_data = dev->data;
 	SAI_HandleTypeDef *hsai = &sub_data->hsai;
-	uint32_t clock_source = 0U;
 
-	if (sai_cfg->pclk_len > 1) {
-		clock_source = sai_cfg->pclken[1].bus;
-	}
+	/* On STM32F4, SAI has a shared kernel clock for both sub-blocks */
+	uint32_t clock_source = sai_cfg->sai_a_pclken.bus;
 
 	switch (clock_source) {
 #if defined(STM32F413xx) || defined(STM32F423xx)
@@ -1055,15 +1063,30 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 			 POST_KERNEL, CONFIG_I2S_INIT_PRIORITY, &i2s_stm32_sai_api);               \
 	K_MSGQ_DEFINE(queue_##node, sizeof(struct queue_item), CONFIG_I2S_STM32_SAI_BLOCK_COUNT, 4);
 
+#define SAI_SHARED_KER_CK_INIT(inst)                                                               \
+	.sai_a_pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_ker_ck),                        \
+	.sai_b_pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_ker_ck),                        \
+	.has_shared_sai_ker_ck = true,
+
+#define SAI_SEPARATE_KER_CK_INIT(inst)                                                             \
+	.sai_a_pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_a_ker_ck),                      \
+	.sai_b_pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_b_ker_ck),                      \
+	.has_shared_sai_ker_ck = false,
+
+#define SAI_KER_CK_INIT(inst)                                                                      \
+	COND_CODE_1(DT_INST_CLOCKS_HAS_NAME(inst, sai_ker_ck),                                     \
+		    (SAI_SHARED_KER_CK_INIT(inst)),                                                \
+		    (SAI_SEPARATE_KER_CK_INIT(inst)))
+
 /* Controller Node */
 #define SAI_INIT(inst)                                                                             \
-	static const struct stm32_pclken clk_##inst[] = STM32_DT_INST_CLOCKS(inst);                \
 	static const struct stm32_sai_cfg sai_cfg_##inst = {                                       \
-		.pclken = clk_##inst,                                                              \
 		.pclk_len = DT_INST_NUM_CLOCKS(inst),                                              \
-	};                                                                                         \
+		.pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, sai_ck),                          \
+		SAI_KER_CK_INIT(inst)};                                                            \
 	DEVICE_DT_INST_DEFINE(inst, &sai_init, NULL, NULL, &sai_cfg_##inst, POST_KERNEL,           \
 			      CONFIG_I2S_INIT_PRIORITY, NULL);                                     \
+                                                                                                   \
 	DT_INST_FOREACH_CHILD_STATUS_OKAY(inst, SAI_SUB_INIT)
 
 DT_INST_FOREACH_STATUS_OKAY(SAI_INIT)

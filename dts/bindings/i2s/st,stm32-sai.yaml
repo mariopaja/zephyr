@@ -15,6 +15,22 @@ properties:
     type: array
     required: true
 
+  clock-names:
+    required: true
+    enum:
+      - "sai_ck"
+      - "sai_ker_ck"
+      - "sai_a_ker_ck"
+      - "sai_b_ker_ck"
+    description: |
+      Expected names are the following:
+      - "sai_ker_ck" for configuring a shared SAI A and B kernel clock
+      - "sai_a_ker_ck" for configuring a SAI A kernel clock
+      - "sai_b_ker_ck" for configuring a SAI B kernel clock
+      Depending on the platform, SAI A and B nodes may use either a shared
+      or a dedicated kernel clocks. This parameter identifies which kernel
+      clock configuration applies.
+
   "#address-cells":
     const: 1
 
