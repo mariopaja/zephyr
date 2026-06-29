@@ -91,6 +91,8 @@
 #define DFSDM1_SEL(val)		STM32_DT_CLOCK_SELECT((val), 24, 24, D2CCIP1R_REG)
 #define FDCAN_SEL(val)		STM32_DT_CLOCK_SELECT((val), 29, 28, D2CCIP1R_REG)
 #define SWP_SEL(val)		STM32_DT_CLOCK_SELECT((val), 31, 31, D2CCIP1R_REG)
+/* Device domain clocks selection helpers (RM0455.pdf) */
+#define SAI2B_SEL(val)      STM32_DT_CLOCK_SELECT((val), 11, 9, D2CCIP1R_REG)
 /** D2CCIP2R devices */
 #define USART2345678_SEL(val)	STM32_DT_CLOCK_SELECT((val), 2, 0, D2CCIP2R_REG)
 #define USART16_SEL(val)	STM32_DT_CLOCK_SELECT((val), 5, 3, D2CCIP2R_REG)
