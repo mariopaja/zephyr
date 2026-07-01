@@ -26,7 +26,36 @@ struct wm8904_driver_config {
 	int fs_ratio;
 };
 
+struct fll_config {
+	uint32_t f_ref;
+	uint32_t f_out;
+	uint32_t f_ref_div;
+	uint16_t f_out_div;
+	uint16_t f_ratio;
+	uint16_t n;
+	uint16_t k;
+};
+
+struct wm8904_driver_data {
+	uint32_t mclk_freq;
+	struct fll_config fll;
+};
+
+static struct {
+	uint32_t min;
+	uint32_t max;
+	uint16_t f_ratio;
+	int ratio;
+} fll_fratios[] = {
+	{       0,    64000, 4, 16 },
+	{   64000,   128000, 3,  8 },
+	{  128000,   256000, 2,  4 },
+	{  256000,  1000000, 1,  2 },
+	{ 1000000, 13500000, 0,  1 },
+};
+
 #define DEV_CFG(dev) ((const struct wm8904_driver_config *const)dev->config)
+#define DEV_DATA(dev) ((struct wm8904_driver_data *const)dev->data)
 
 static void wm8904_write_reg(const struct device *dev, uint8_t reg, uint16_t val);
 static void wm8904_read_reg(const struct device *dev, uint8_t reg, uint16_t *val);
@@ -406,10 +435,171 @@ static void wm8904_set_master_clock(const struct device *dev, audio_dai_cfg_t *c
 	wm8904_update_reg(dev, WM8904_REG_AUDIO_IF_3, 0xFFFU, audioInterface);
 }
 
+static uint32_t wm8904_calc_fll_k(uint32_t nmod, uint32_t f_ref)
+{
+	uint32_t k = 0U;
+
+	/*
+	 * Calculate:
+	 *
+	 *   k = floor((nmod * 2^16) / f_ref)
+	 *
+	 * without using 64-bit multiplication.
+	 */
+	for (uint32_t i = 0U; i < 16U; i++) {
+		nmod <<= 1;
+		k <<= 1;
+
+		if (nmod >= f_ref) {
+			nmod -= f_ref;
+			k |= 1U;
+		}
+	}
+
+	/* Round to nearest */
+	if ((nmod << 1) >= f_ref) {
+		k++;
+	}
+
+	return k;
+}
+
+static int wm8904_fll_cfg(const struct device *dev)
+{
+	struct wm8904_driver_data *dev_data = DEV_DATA(dev);
+	uint32_t n_div, n_mod, target, val;
+
+	dev_data->fll.f_ref = dev_data->mclk_freq;
+	dev_data->fll.f_ref_div = 0;
+	val = 1;
+
+	/* Fref must be <=13.5MHz */
+	while ((dev_data->fll.f_ref / val) > 13500000) {
+		if (val >= 8) {
+			LOG_ERR("Can't scale %dMHz input down to <=13.5MHz\n", dev_data->fll.f_ref);
+			return -EINVAL;
+		}
+
+		val *= 2;
+		dev_data->fll.f_ref_div++;
+	}
+
+	dev_data->fll.f_ref /= val;
+
+	/* Fvco should be 90-100MHz; don't check the upper bound */
+	val = 4;
+	while ((dev_data->fll.f_out * val) < 90000000) {
+		val++;
+		if (val > 64) {
+			LOG_ERR("Unable to find FLL_OUTDIV for Fout=%uHz", dev_data->fll.f_out);
+			return -EINVAL;
+		}
+	}
+
+	target = dev_data->fll.f_out * val;
+	dev_data->fll.f_out_div = val - 1;
+
+	/* Find an appropriate FLL_FRATIO and factor it out of the target */
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(fll_fratios); i++) {
+		if (fll_fratios[i].min <= dev_data->fll.f_ref &&
+		    dev_data->fll.f_ref <= fll_fratios[i].max) {
+			dev_data->fll.f_ratio = fll_fratios[i].f_ratio;
+			target /= fll_fratios[i].ratio;
+			break;
+		}
+	}
+
+	if (i == ARRAY_SIZE(fll_fratios)) {
+		LOG_ERR("Unable to find FLL_FRATIO for Fref=%uHz\n", dev_data->fll.f_ref);
+		return -EINVAL;
+	}
+
+	/* Now, calculate N.K */
+	n_div = target / dev_data->fll.f_ref;
+	dev_data->fll.n = n_div;
+	n_mod = target % dev_data->fll.f_ref;
+
+	dev_data->fll.k = wm8904_calc_fll_k(n_mod, dev_data->fll.f_ref);
+
+	LOG_DBG("N=%x, K=%x, FLL_FRATIO=%x, FLL_OUTDIV=%x, FLL_CLK_REF_DIV=%x", dev_data->fll.n,
+		dev_data->fll.k, dev_data->fll.f_ratio, dev_data->fll.f_out_div,
+		dev_data->fll.f_ref_div);
+
+	/* Ensure the FLL is stopped */
+	wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_1,
+			  (uint16_t)(1UL << 1U) | (uint16_t)(1UL << 0U), 0x0000);
+
+	if (dev_data->fll.k != 0) {
+		wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_1, (uint16_t)(1UL << 2U), 0x0004);
+
+		wm8904_write_reg(dev, WM8904_REG_FLL_CONTROL_3, dev_data->fll.k);
+	}
+
+	wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_4, (uint16_t)(0x03FFU << 5U),
+			  (uint16_t)(dev_data->fll.n << 5U));
+
+	wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_5, (uint16_t)(0x03U << 3U),
+			  (uint16_t)(dev_data->fll.f_ref_div << 3U));
+
+	wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_1, (uint16_t)(1UL << 1U),
+			  (uint16_t)(1UL << 1U));
+
+	wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_1, (uint16_t)(1UL << 0U), 0x0001);
+
+	return 0;
+}
+
+static int wm8904_sysclk_cfg(const struct device *dev, struct audio_codec_cfg *cfg)
+{
+	const struct wm8904_driver_config *const dev_cfg = DEV_CFG(dev);
+	struct wm8904_driver_data *dev_data = DEV_DATA(dev);
+	int ret;
+
+	/* Calculate MCLK */
+	if (dev_cfg->mclk_dev != NULL && dev_cfg->mclk_name != NULL) {
+		ret = clock_control_on(dev_cfg->mclk_dev, dev_cfg->mclk_name);
+
+		if (ret < 0) {
+			LOG_ERR("MCLK clock source enable fail: %d", ret);
+			return ret;
+		}
+
+		ret = clock_control_get_rate(dev_cfg->mclk_dev, dev_cfg->mclk_name,
+					     &dev_data->mclk_freq);
+		if (ret < 0) {
+			LOG_ERR("MCLK clock source freq acquire fail: %d", ret);
+			return ret;
+		}
+	} else {
+		dev_data->mclk_freq = cfg->mclk_freq;
+	}
+
+	if (dev_cfg->clock_source == 0) {
+		LOG_DBG("MCLK selected as SYSCLK source");
+
+		/* Ensure the FLL is stopped */
+		wm8904_update_reg(dev, WM8904_REG_FLL_CONTROL_1,
+				  (uint16_t)(1UL << 1U) | (uint16_t)(1UL << 0U), 0x0000);
+	} else {
+		LOG_DBG("FLL selected as SYSCLK source");
+
+		/* Target FLL output clock */
+		dev_data->fll.f_out = cfg->mclk_freq;
+
+		wm8904_fll_cfg(dev);
+
+		wm8904_update_reg(dev, WM8904_REG_CLK_RATES_2, (uint16_t)(1UL << 14U),
+				  (uint16_t)(dev_cfg->clock_source));
+	}
+
+	return 0;
+}
+
 static int wm8904_configure(const struct device *dev, struct audio_codec_cfg *cfg)
 {
 	uint16_t value;
-	const struct wm8904_driver_config *const dev_cfg = DEV_CFG(dev);
 
 	if (cfg->dai_type >= AUDIO_DAI_TYPE_INVALID) {
 		LOG_ERR("dai_type not supported");
@@ -417,6 +607,8 @@ static int wm8904_configure(const struct device *dev, struct audio_codec_cfg *cf
 	}
 
 	wm8904_soft_reset(dev);
+
+	wm8904_sysclk_cfg(dev, cfg);
 
 	if (cfg->dai_route == AUDIO_ROUTE_BYPASS) {
 		return 0;
@@ -480,40 +672,6 @@ static int wm8904_configure(const struct device *dev, struct audio_codec_cfg *cf
 	wm8904_write_reg(dev, WM8904_REG_CHRG_PUMP_0, 0x0001);
 
 	wm8904_protocol_config(dev, cfg->dai_type);
-	wm8904_update_reg(dev, WM8904_REG_CLK_RATES_2, (uint16_t)(1UL << 14U),
-			  (uint16_t)(dev_cfg->clock_source));
-
-	if (dev_cfg->clock_source == 0) {
-		LOG_DBG("MCLK selected as clock source");
-
-		/* Both MCLK dev & MCLK name should be present */
-		if (dev_cfg->mclk_dev != NULL && dev_cfg->mclk_name != NULL) {
-			int err = clock_control_on(dev_cfg->mclk_dev, dev_cfg->mclk_name);
-
-			if (err < 0) {
-				LOG_ERR("MCLK clock source enable fail: %d", err);
-				return err;
-			}
-
-			err = clock_control_get_rate(dev_cfg->mclk_dev, dev_cfg->mclk_name,
-						     &cfg->mclk_freq);
-			if (err < 0) {
-				LOG_ERR("MCLK clock source freq acquire fail: %d", err);
-				return err;
-			}
-		} else {
-			if (dev_cfg->fs_ratio == 0) {
-				LOG_ERR("Cannot compute MCLK: missing MCLK and fs_ratio in DT");
-				return -EINVAL;
-			}
-
-			cfg->mclk_freq = cfg->dai_cfg.i2s.frame_clk_freq * dev_cfg->fs_ratio;
-			LOG_WRN("Cannot obtain MCLK from DT, using computed MCLK=%u from fs_ratio",
-				cfg->mclk_freq);
-		}
-	} else {
-		LOG_DBG("FLL selected as clock source");
-	}
 
 	wm8904_audio_fmt_config(dev, &cfg->dai_cfg, cfg->mclk_freq);
 
@@ -682,6 +840,7 @@ static DEVICE_API(audio_codec, wm8904_driver_api) = {
 };
 
 #define WM8904_INIT(n)                                                                             \
+	struct wm8904_driver_data wm8904_device_data_##n = {0};                                    \
 	static const struct wm8904_driver_config wm8904_device_config_##n = {                      \
 		.i2c = I2C_DT_SPEC_INST_GET(n),                                                    \
 		.clock_source = DT_INST_ENUM_IDX(n, clock_source),                                 \
@@ -692,7 +851,7 @@ static DEVICE_API(audio_codec, wm8904_driver_api) = {
 			(NULL)),                                                                   \
 		.fs_ratio = DT_INST_PROP_OR(n, fs_ratio, 0)};                                      \
                                                                                                    \
-	DEVICE_DT_INST_DEFINE(n, NULL, NULL, NULL, &wm8904_device_config_##n, POST_KERNEL,         \
-			      CONFIG_AUDIO_CODEC_INIT_PRIORITY, &wm8904_driver_api);
+	DEVICE_DT_INST_DEFINE(n, NULL, NULL, &wm8904_device_data_##n, &wm8904_device_config_##n,   \
+			      POST_KERNEL, CONFIG_AUDIO_CODEC_INIT_PRIORITY, &wm8904_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(WM8904_INIT)
