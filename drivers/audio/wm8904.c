@@ -23,6 +23,7 @@ struct wm8904_driver_config {
 	int clock_source;
 	const struct device *mclk_dev;
 	clock_control_subsys_t mclk_name;
+	int in_pga_sel;
 };
 
 struct wm8904_eq_band_reg {
@@ -907,8 +908,10 @@ static void wm8904_configure_output(const struct device *dev)
 
 static void wm8904_configure_input(const struct device *dev)
 {
-	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_LEFT, 2);
-	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_RIGHT, 2);
+	const struct wm8904_driver_config *const dev_cfg = DEV_CFG(dev);
+
+	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_LEFT, dev_cfg->in_pga_sel);
+	wm8904_route_input(dev, AUDIO_CHANNEL_FRONT_RIGHT, dev_cfg->in_pga_sel);
 
 	wm8904_in_volume_config(dev, AUDIO_CHANNEL_ALL, WM8904_INPUT_VOLUME_DEFAULT);
 	wm8904_in_mute_config(dev, AUDIO_CHANNEL_ALL, false);
@@ -934,7 +937,8 @@ static DEVICE_API(audio_codec, wm8904_driver_api) = {
 			(DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(n, mclk))), (NULL)),            \
 		.mclk_name = COND_CODE_1(DT_INST_CLOCKS_HAS_NAME(n, mclk),                         \
 			((clock_control_subsys_t)DT_INST_CLOCKS_CELL_BY_NAME(n, mclk, name)),      \
-			(NULL))};                                                                  \
+			(NULL)),                                                                   \
+		.in_pga_sel = DT_INST_PROP_OR(n, input_pga_select, 2)};                            \
                                                                                                    \
 	DEVICE_DT_INST_DEFINE(n, NULL, NULL, &wm8904_device_data_##n, &wm8904_device_config_##n,   \
 			      POST_KERNEL, CONFIG_AUDIO_CODEC_INIT_PRIORITY, &wm8904_driver_api);

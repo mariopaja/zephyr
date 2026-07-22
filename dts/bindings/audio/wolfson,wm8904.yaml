@@ -30,3 +30,11 @@ properties:
       the "clock-source" property is set to "FLL". The FLL reference clock
       is supplied by the host and is used to generate the codec's internal
       clock signal (SYSCLK).
+  input-pga-select:
+    type: int
+    default: 2
+    enum: [1, 2, 3]
+    description: |
+      Selects the WM8904 input PGA source channel.
+      Only single-ended input mode is supported.
+      On the 32-pin QFN package, only channels 1 and 2 are supported.
