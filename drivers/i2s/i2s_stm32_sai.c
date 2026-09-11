@@ -24,10 +24,19 @@
 #include <zephyr/irq.h>
 LOG_MODULE_REGISTER(i2s_stm32_sai, CONFIG_I2S_LOG_LEVEL);
 
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+#include <OpenPDMFilter.h>
+#endif
+
 enum mclk_divider {
 	MCLK_NO_DIV,
 	MCLK_DIV_256,
 	MCLK_DIV_512
+};
+
+enum sai_mode {
+	SAI_MODE_I2S,
+	SAI_MODE_PDM,
 };
 
 static const uint32_t dma_priority[] = {
@@ -76,6 +85,35 @@ static const uint32_t sai_fifo_threshold[] = {
 	SAI_FIFOTHRESHOLD_FULL,
 };
 
+static const uint32_t sai_pdm_clock_enable[] = {
+	SAI_PDM_CLOCK1_ENABLE,
+	SAI_PDM_CLOCK2_ENABLE,
+	SAI_PDM_CLOCK1_ENABLE | SAI_PDM_CLOCK2_ENABLE,
+};
+
+/*
+ * PDM frame/slot layout per number of microphone pairs. Init.PdmInit only
+ * captures the raw PDM bitstream into the FIFO 8 bits at a time (DataSize =
+ * SAI_DATASIZE_8) -- it does not demodulate to PCM in hardware. Each mic
+ * pair takes 2 slots (one per channel of the pair), confirmed against both
+ * the ST BSP's MX_SAI1_Init() (SlotNumber=2 for MicPairsNbr=1) and the
+ * STM32CubeU3 SAI_AudioRecord_PDM example (FrameLength=16, SlotNumber=2,
+ * DataSize=8 for 1 mic pair). SlotSize follows Init.DataSize
+ * (SAI_SLOTSIZE_DATASIZE) rather than forcing a fixed slot width.
+ */
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+struct sai_pdm_frame_cfg {
+	uint32_t frame_length;
+	uint32_t slot_number;
+};
+
+static const struct sai_pdm_frame_cfg sai_pdm_frame_cfg[] = {
+	{.frame_length = 16, .slot_number = 2}, /* 1 pair: 2 slots x 8-bit DataSize */
+	{.frame_length = 32, .slot_number = 4}, /* 2 pairs */
+	{.frame_length = 48, .slot_number = 6}, /* 3 pairs */
+};
+#endif
+
 struct queue_item {
 	void *buffer;
 	size_t size;
@@ -105,10 +143,47 @@ struct stream {
 	void (*queue_drop)(const struct device *dev);
 };
 
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+typedef void (*sai_pdm_filter_fn_t)(uint8_t *data, uint16_t *data_out, uint16_t volume,
+				     TPDMFilter_InitStruct *param);
+
+/*
+ * PDM->PCM decimation state (ST's OpenPDMFilter, one mic pair / stereo
+ * only for now). Open_PDM_Filter_64()/_128() each process one "group":
+ * Fs/1000 output samples at once, consuming 8 (or 16, for _128) raw bytes
+ * per channel per sample. group_raw_bytes/group_pcm_samples are that
+ * group's sizes, precomputed once in sai_sub_pdm_conf().
+ */
+struct sai_pdm_data {
+	TPDMFilter_InitStruct filter[2]; /* [0] = left, [1] = right */
+	sai_pdm_filter_fn_t filter_fn;
+	uint32_t group_raw_bytes;
+	uint32_t group_pcm_samples; /* per channel, per group */
+	uint16_t volume;
+	bool mono;
+	uint8_t mono_channel; /* which of filter[]/the raw byte pair mono uses */
+
+	/*
+	 * Second single-pole lowpass stage, cascaded after the filter's own
+	 * LP_HZ smoothing (see sai_sub_pdm_conf()) for an effective 12dB/
+	 * octave rolloff instead of 6dB/octave -- cuts more noise-shaped PDM
+	 * quantization noise without pushing LP_HZ itself any lower (which
+	 * trades away treble). smooth_state persists across calls, one per
+	 * channel, same as the library's own OldZ/OldOut.
+	 */
+	uint16_t smooth_alfa;
+	int32_t smooth_state[2];
+};
+#endif
+
 struct stm32_sai_sub_data {
 	SAI_HandleTypeDef hsai;
 	DMA_HandleTypeDef hdma;
 	struct stream stream;
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+	struct sai_pdm_data pdm;
+	bool pdm_active;
+#endif
 };
 
 struct stm32_sai_sub_cfg {
@@ -117,6 +192,12 @@ struct stm32_sai_sub_cfg {
 	enum mclk_divider mclk_div;
 	bool synchronous;
 	enum i2s_dir dir;
+	enum sai_mode mode;
+	uint8_t pdm_mic_pairs;
+	uint32_t pdm_clock_enable;
+	uint8_t pdm_volume;
+	bool pdm_mono;
+	uint8_t pdm_mono_channel;
 
 	const struct device *controller;
 };
@@ -147,6 +228,89 @@ static inline void sai_sub_disable(SAI_HandleTypeDef *hsai, i2s_opt_t options)
 	LOG_DBG("SAI Disabled");
 }
 
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+/*
+ * Fixed reference gain the filter is calibrated against (Init.MaxVolume
+ * below); NOT the user-facing gain knob. See sai_pdm_decimate().
+ */
+#define SAI_PDM_MAX_VOLUME 64U
+
+/*
+ * Decimate a raw PDM capture block to PCM in place. Safe to overwrite buf
+ * as it goes: each output group is always smaller than, and fully behind,
+ * the raw group it was derived from.
+ *
+ * Channel A always goes through the filter at its native interleaved
+ * stride (matching In_MicChannels=2, which the raw byte layout requires
+ * regardless of how many mics are actually wired). In mono mode channel B
+ * is skipped entirely and the channel-A samples -- still strided every
+ * other int16_t at that point -- are compacted down to a contiguous mono
+ * buffer afterward, rather than handed to the app interleaved with
+ * channel B's unconnected-mic noise.
+ */
+static size_t sai_pdm_decimate(struct stm32_sai_sub_data *sub_data, void *buf, size_t raw_len)
+{
+	struct sai_pdm_data *pdm = &sub_data->pdm;
+	uint8_t *raw = buf;
+	int16_t *pcm = buf;
+	uint32_t n_groups = raw_len / pdm->group_raw_bytes;
+	uint32_t out_index = 0;
+
+	uint8_t ch_a = pdm->mono ? pdm->mono_channel : 0U;
+
+	/*
+	 * Always decode at the library's calibrated reference gain
+	 * (MaxVolume) for full output resolution -- Open_PDM_Filter_64's
+	 * runtime `volume` argument shares one div_const computed once from
+	 * MaxVolume at init, so passing a low volume here doesn't cleanly
+	 * attenuate: it throws away output bits (e.g. volume=4 of
+	 * MaxVolume=64 only ever reaches 1/16 of the output range, ~4 bits
+	 * of resolution lost) rather than scaling the full-resolution
+	 * signal down. Apply pdm->volume afterward instead, at int32
+	 * precision. (Zephyr's own dmic_mpxxdtyy.c driver, using this same
+	 * library, follows the same pattern: it always passes MaxVolume
+	 * itself as the runtime gain argument.)
+	 */
+	for (uint32_t i = 0; i < n_groups; i++) {
+		uint8_t *group = raw + i * pdm->group_raw_bytes;
+
+		pdm->filter_fn(group + ch_a, (uint16_t *)&pcm[out_index], SAI_PDM_MAX_VOLUME,
+				&pdm->filter[ch_a]);
+		if (!pdm->mono) {
+			pdm->filter_fn(group + 1, (uint16_t *)&pcm[out_index + 1],
+					SAI_PDM_MAX_VOLUME, &pdm->filter[1]);
+		}
+		out_index += pdm->group_pcm_samples * 2U;
+	}
+
+	if (pdm->mono) {
+		uint32_t n_samples = out_index / 2U;
+
+		for (uint32_t i = 0; i < n_samples; i++) {
+			int16_t sample = (int16_t)(((int32_t)pcm[i * 2U] * pdm->volume) /
+						    SAI_PDM_MAX_VOLUME);
+
+			pdm->smooth_state[0] = ((256 - pdm->smooth_alfa) * pdm->smooth_state[0] +
+						 pdm->smooth_alfa * (int32_t)sample) >>
+						8;
+			pcm[i] = (int16_t)pdm->smooth_state[0];
+		}
+		return n_samples * sizeof(int16_t);
+	}
+
+	for (uint32_t i = 0; i < out_index; i++) {
+		int16_t sample = (int16_t)(((int32_t)pcm[i] * pdm->volume) / SAI_PDM_MAX_VOLUME);
+		int32_t *state = &pdm->smooth_state[i % 2U];
+
+		*state = ((256 - pdm->smooth_alfa) * (*state) + pdm->smooth_alfa * (int32_t)sample) >>
+			 8;
+		pcm[i] = (int16_t)*state;
+	}
+
+	return out_index * sizeof(int16_t);
+}
+#endif
+
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 {
 	struct stm32_sai_sub_data *sub_data = CONTAINER_OF(hsai, struct stm32_sai_sub_data, hsai);
@@ -168,6 +332,39 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 			return;
 		}
 	}
+
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+	if (sub_data->pdm_active) {
+		/*
+		 * Temporary capture/decimation debug prints -- raw bytes are
+		 * only visible here, before decimation overwrites them
+		 * in-place. Re-disable (comment back out) once the raw/PCM
+		 * split doesn't need re-checking anymore; steady-state sample
+		 * printing belongs in the application, not here.
+		 */
+		static uint32_t dbg_count;
+		uint8_t *raw = stream->mem_block;
+		bool dbg_print = (dbg_count++ % 50U) == 0U;
+
+		if (dbg_print) {
+			LOG_DBG("PDM raw: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x"
+				" %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+				raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+				raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+				raw[15], raw[16], raw[17], raw[18], raw[19]);
+		}
+
+		stream->mem_block_len =
+			sai_pdm_decimate(sub_data, stream->mem_block, stream->mem_block_len);
+
+		if (dbg_print) {
+			int16_t *pcm = stream->mem_block;
+
+			LOG_DBG("PDM pcm: %d %d %d %d %d %d %d %d %d %d", pcm[0], pcm[1],
+				pcm[2], pcm[3], pcm[4], pcm[5], pcm[6], pcm[7], pcm[8], pcm[9]);
+		}
+	}
+#endif
 
 	struct queue_item item = {.buffer = stream->mem_block, .size = stream->mem_block_len};
 
@@ -553,8 +750,9 @@ static int stm32_sai_sub_f4_clk_src_conf(const struct device *dev)
 }
 #endif /* CONFIG_SOC_SERIES_STM32F4X */
 
-static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
-				   const struct i2s_config *i2s_cfg)
+/* I2S/PCM protocol configuration (SAI block used with a standard audio protocol). */
+static int sai_sub_i2s_pcm_conf(const struct device *dev, enum i2s_dir dir,
+			     const struct i2s_config *i2s_cfg)
 {
 	const struct stm32_sai_sub_cfg *const sub_cfg = dev->config;
 	struct stm32_sai_sub_data *const sub_data = dev->data;
@@ -763,6 +961,28 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 		return -EIO;
 	}
 
+	/*
+	 * TEMPORARY: compare the clock rate HAL_SAI_InitProtocol used
+	 * internally (via HAL_RCCEx_GetPeriphCLKFreq) against Zephyr's own
+	 * clock_control_get_rate() for the same physical clock, to check
+	 * whether the two independent clock-tree implementations actually
+	 * agree -- suspected root cause of a small, constant RX/TX rate
+	 * mismatch (a precise ~9.4s beat period draining TX's buffer).
+	 */
+	{
+		const struct stm32_sai_cfg *dbg_sai_cfg = sub_cfg->controller->config;
+		const struct device *dbg_clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+		uint32_t dbg_rate = 0;
+		int dbg_ret;
+
+		dbg_ret = clock_control_get_rate(dbg_clk,
+						  (clock_control_subsys_t)&dbg_sai_cfg->sai_ker_ck,
+						  &dbg_rate);
+		LOG_DBG("TX clock check: HAL Mckdiv=%u NoDivider=%u; "
+			"clock_control_get_rate=%u (ret=%d)",
+			hsai->Init.Mckdiv, hsai->Init.NoDivider, dbg_rate, dbg_ret);
+	}
+
 	stream->state = I2S_STATE_READY;
 
 	/*
@@ -790,6 +1010,237 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 	}
 
 	return 0;
+}
+
+/* PDM protocol configuration (SAI block A used as a PDM microphone interface). */
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+/*
+ * Target PDM bit clock (SAI_CKn) for a given PCM sample rate, matching the
+ * ST BSP's MX_SAI_ClockConfig() table. The oversampling ratio (64x or 32x)
+ * differs between the two rate families so that SAI_CKn stays within the
+ * range PDM MEMS microphones expect; it is not a fixed multiple of the
+ * sample rate. Mckdiv itself is computed at runtime from this target and
+ * the actual configured SAI kernel clock, not read from devicetree.
+ */
+static uint32_t sai_pdm_target_clock(uint32_t frame_clk_freq)
+{
+	switch (frame_clk_freq) {
+	case 8000U:
+	case 16000U:
+	case 32000U:
+		/*
+		 * BSP-matched value is 1024000 (decimation=64). Doubled to
+		 * 2048000 (decimation=128) as an SNR experiment: more
+		 * oversampling before decimation pushes down sigma-delta
+		 * quantization noise more fundamentally than post-filtering
+		 * it out. Still well within typical PDM MEMS mic clock
+		 * range (~1-3.25MHz). Revert to 1024000 to go back to the
+		 * BSP-verified value.
+		 */
+		return 2048000U;
+	case 48000U:
+	case 96000U:
+	case 192000U:
+		return 3072000U;
+	case 11025U:
+	case 22050U:
+	case 44100U:
+		return 1411200U;
+	case 88200U:
+	case 176400U:
+		return 2822400U;
+	default:
+		return 0U;
+	}
+}
+#endif
+
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+static int sai_sub_pdm_conf(const struct device *dev, enum i2s_dir dir,
+			     const struct i2s_config *i2s_cfg)
+{
+	const struct stm32_sai_sub_cfg *const sub_cfg = dev->config;
+	const struct stm32_sai_cfg *sai_cfg = sub_cfg->controller->config;
+	struct stm32_sai_sub_data *const sub_data = dev->data;
+	struct stream *stream = &sub_data->stream;
+	SAI_HandleTypeDef *hsai = &sub_data->hsai;
+	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+	const struct sai_pdm_frame_cfg *frame_cfg;
+	sai_pdm_filter_fn_t filter_fn;
+	uint32_t sai_ker_ck_rate;
+	uint32_t target_clock;
+	uint32_t decimation;
+	uint32_t bytes_per_channel_per_sample;
+	int ret;
+
+	if (dir != I2S_DIR_RX) {
+		LOG_ERR("SAI PDM mode only supports RX");
+		return -EINVAL;
+	}
+
+	if ((i2s_cfg->options & (I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET)) != 0) {
+		LOG_ERR("SAI PDM mode requires the controller (master) role");
+		return -EINVAL;
+	}
+
+	if (stream->state != I2S_STATE_NOT_READY && stream->state != I2S_STATE_READY) {
+		LOG_ERR("Invalid state: %d", (int)stream->state);
+		return -EINVAL;
+	}
+
+	if (sub_cfg->pdm_mic_pairs != 1U) {
+		LOG_ERR("PDM decimation only supports 1 mic pair (stereo) for now");
+		return -ENOTSUP;
+	}
+
+	target_clock = sai_pdm_target_clock(i2s_cfg->frame_clk_freq);
+	if (target_clock == 0U) {
+		LOG_ERR("Invalid frame_clk_freq %u for PDM mode", i2s_cfg->frame_clk_freq);
+		return -EINVAL;
+	}
+
+	decimation = target_clock / i2s_cfg->frame_clk_freq;
+	switch (decimation) {
+	case 64U:
+		filter_fn = Open_PDM_Filter_64;
+		bytes_per_channel_per_sample = 8U;
+		break;
+	case 128U:
+		filter_fn = Open_PDM_Filter_128;
+		bytes_per_channel_per_sample = 16U;
+		break;
+	default:
+		LOG_ERR("PDM decimation %u not supported (need 64 or 128)", decimation);
+		return -ENOTSUP;
+	}
+
+	sub_data->pdm.group_pcm_samples = i2s_cfg->frame_clk_freq / 1000U;
+	sub_data->pdm.group_raw_bytes =
+		bytes_per_channel_per_sample * 2U * sub_data->pdm.group_pcm_samples;
+
+	if (sub_data->pdm.group_pcm_samples == 0U ||
+	    (i2s_cfg->block_size % sub_data->pdm.group_raw_bytes) != 0U) {
+		LOG_ERR("block_size (%u) must be a non-zero multiple of %u raw bytes for PDM",
+			i2s_cfg->block_size, sub_data->pdm.group_raw_bytes);
+		return -EINVAL;
+	}
+
+	ret = clock_control_get_rate(clk, (clock_control_subsys_t)&sai_cfg->sai_ker_ck,
+				      &sai_ker_ck_rate);
+	if (ret != 0) {
+		LOG_ERR("Could not get SAI kernel clock rate: %d", ret);
+		return ret;
+	}
+
+	memcpy(&stream->i2s_cfg, i2s_cfg, sizeof(struct i2s_config));
+	stream->master = true;
+	stream->dma_src_size = 1; /* raw 8-bit PDM bitstream bytes, not PCM */
+
+	frame_cfg = &sai_pdm_frame_cfg[sub_cfg->pdm_mic_pairs - 1];
+
+	hsai->Init.Synchro = SAI_ASYNCHRONOUS;
+	hsai->Init.AudioMode = SAI_MODEMASTER_RX;
+	hsai->Init.Protocol = SAI_FREE_PROTOCOL;
+	hsai->Init.FirstBit = SAI_FIRSTBIT_LSB;
+	hsai->Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
+	hsai->Init.DataSize = SAI_DATASIZE_8;
+	hsai->Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
+	hsai->Init.NoDivider = SAI_MASTERDIVIDER_DISABLE;
+	hsai->Init.Mckdiv = DIV_ROUND_CLOSEST(sai_ker_ck_rate, 2U * target_clock);
+
+	hsai->FrameInit.FrameLength = frame_cfg->frame_length;
+	hsai->FrameInit.ActiveFrameLength = 1U;
+	hsai->FrameInit.FSDefinition = SAI_FS_STARTFRAME;
+	hsai->FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
+	hsai->FrameInit.FSOffset = SAI_FS_FIRSTBIT;
+
+	hsai->SlotInit.FirstBitOffset = 0;
+	hsai->SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
+	hsai->SlotInit.SlotNumber = frame_cfg->slot_number;
+	hsai->SlotInit.SlotActive = SAI_SLOTACTIVE_ALL;
+
+	hsai->Init.PdmInit.Activation = ENABLE;
+	hsai->Init.PdmInit.MicPairsNbr = sub_cfg->pdm_mic_pairs;
+	hsai->Init.PdmInit.ClockEnable = sub_cfg->pdm_clock_enable;
+
+	if (HAL_SAI_Init(hsai) != HAL_OK) {
+		LOG_ERR("HAL_SAI_Init (PDM): <FAILED>");
+		return -EIO;
+	}
+
+	sub_data->pdm.filter_fn = filter_fn;
+	sub_data->pdm.volume = sub_cfg->pdm_volume;
+	sub_data->pdm.mono = sub_cfg->pdm_mono;
+	sub_data->pdm.mono_channel = sub_cfg->pdm_mono_channel;
+
+	for (int ch = 0; ch < 2; ch++) {
+		TPDMFilter_InitStruct *filt = &sub_data->pdm.filter[ch];
+
+		memset(filt, 0, sizeof(*filt));
+		filt->Fs = (uint16_t)i2s_cfg->frame_clk_freq;
+		filt->In_MicChannels = 2U;
+		filt->Out_MicChannels = 2U;
+		filt->Decimation = (uint8_t)decimation;
+		filt->MaxVolume = SAI_PDM_MAX_VOLUME;
+		/*
+		 * HP_HZ/LP_HZ = 0 does NOT mean "disabled" here despite how it
+		 * reads: Open_PDM_Filter_Init() maps HP_HZ/LP_HZ == 0 to
+		 * HP_ALFA/LP_ALFA = 0, but the runtime filter never bypasses
+		 * those stages -- it just freezes OldOut/OldZ at their initial
+		 * 0, so the output stays 0 forever regardless of input. Both
+		 * must be non-zero for any signal to reach the output.
+		 */
+		filt->HP_HZ = 10.0f;
+		/*
+		 * Was frame_clk_freq/2 (Nyquist, no real attenuation), then
+		 * /4, then /8 -- each step measurably cut noise on real
+		 * hardware without a corresponding gain-staging fix, so
+		 * pushing the cutoff down further is the cheapest remaining
+		 * SNR lever. Trades some treble for a lower noise floor.
+		 */
+		filt->LP_HZ = (float)i2s_cfg->frame_clk_freq / 16.0f;
+		Open_PDM_Filter_Init(filt);
+	}
+
+	/*
+	 * Second lowpass stage cascaded in sai_pdm_decimate(), same cutoff
+	 * and same single-pole ALFA formula as the library's own LP_HZ
+	 * (Open_PDM_Filter_Init()) -- two identical single-pole stages back
+	 * to back give an effective 12dB/octave rolloff instead of 6dB/
+	 * octave, without lowering the cutoff itself any further.
+	 */
+	{
+		float smooth_lp_hz = (float)i2s_cfg->frame_clk_freq / 16.0f;
+
+		sub_data->pdm.smooth_alfa =
+			(uint16_t)(smooth_lp_hz * 256.0f /
+				   (smooth_lp_hz + (float)i2s_cfg->frame_clk_freq / (2.0f * 3.14159f)));
+		sub_data->pdm.smooth_state[0] = 0;
+		sub_data->pdm.smooth_state[1] = 0;
+	}
+
+	sub_data->pdm_active = true;
+	stream->state = I2S_STATE_READY;
+
+	return 0;
+}
+#endif /* CONFIG_I2S_STM32_SAI_PDM */
+
+static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
+			       const struct i2s_config *i2s_cfg)
+{
+#if defined(CONFIG_I2S_STM32_SAI_PDM)
+	const struct stm32_sai_sub_cfg *const sub_cfg = dev->config;
+
+	if (sub_cfg->mode == SAI_MODE_PDM) {
+		LOG_DBG("%s: PDM mode selected", dev->name);
+		return sai_sub_pdm_conf(dev, dir, i2s_cfg);
+	}
+#endif
+
+	LOG_DBG("%s: I2S/PCM mode selected", dev->name);
+
+	return sai_sub_i2s_pcm_conf(dev, dir, i2s_cfg);
 }
 
 static int stm32_sai_sub_write(const struct device *dev, void *mem_block, size_t size)
@@ -1056,6 +1507,7 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 };
 
 #define SAI_FIFO_THRESHOLD(node) sai_fifo_threshold[DT_ENUM_IDX(node, fifo_threshold)]
+#define SAI_PDM_CLOCK_ENABLE(node) sai_pdm_clock_enable[DT_ENUM_IDX(node, st_sai_pdm_clock)]
 
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32_dma_v2bis)
 #define DMA_SLOT_BY_IDX(id, idx, slot) 0
@@ -1085,7 +1537,21 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 		.queue_drop = queue_drop,                                                          \
 	}
 
+#define SAI_SUB_MODE(node) CONCAT(SAI_MODE_, DT_STRING_UPPER_TOKEN(node, st_sai_mode))
+
 #define SAI_SUB_INIT(node)                                                                         \
+	BUILD_ASSERT(SAI_SUB_MODE(node) != SAI_MODE_PDM ||                                        \
+			     !DT_DMAS_HAS_NAME(node, tx),                                          \
+		     "SAI PDM mode requires RX DMA only (dma-names must be \"rx\")");             \
+	BUILD_ASSERT(SAI_SUB_MODE(node) != SAI_MODE_PDM ||                                        \
+			     DT_PROP(node, st_sai_pdm_capable),                                    \
+		     DT_NODE_FULL_NAME(node) " does not support PDM mode");                        \
+	BUILD_ASSERT(SAI_SUB_MODE(node) != SAI_MODE_PDM ||                                        \
+			     IS_ENABLED(CONFIG_I2S_STM32_SAI_PDM),                                 \
+		     "PDM mode requires CONFIG_I2S_STM32_SAI_PDM=y (PDM2PCM decimation)");         \
+	BUILD_ASSERT(SAI_SUB_MODE(node) != SAI_MODE_PDM ||                                        \
+			     DT_PROP(node, st_sai_pdm_volume) <= 64,                               \
+		     "st,sai-pdm-volume must be 0-64");                                            \
 	PINCTRL_DT_DEFINE(node);                                                                   \
                                                                                                    \
 	static struct stm32_sai_sub_data sub_data_##node = {                                       \
@@ -1107,6 +1573,12 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 		.mclk_enable = DT_PROP(node, mclk_enable),                                         \
 		.mclk_div = DT_ENUM_IDX(node, mclk_divider),                                       \
 		.synchronous = DT_PROP(node, synchronous),                                         \
+		.mode = SAI_SUB_MODE(node),                                                        \
+		.pdm_mic_pairs = DT_PROP(node, st_sai_pdm_mic_pairs),                              \
+		.pdm_clock_enable = SAI_PDM_CLOCK_ENABLE(node),                                    \
+		.pdm_volume = DT_PROP(node, st_sai_pdm_volume),                                    \
+		.pdm_mono = DT_PROP(node, st_sai_pdm_mono),                                        \
+		.pdm_mono_channel = DT_ENUM_IDX(node, st_sai_pdm_mono_channel),                    \
 		.controller = DEVICE_DT_GET(DT_PARENT(node)),                                      \
 		.dir = COND_CODE_1(DT_DMAS_HAS_NAME(node, tx), (I2S_DIR_TX), (I2S_DIR_RX)),        \
 	};                                                                                         \

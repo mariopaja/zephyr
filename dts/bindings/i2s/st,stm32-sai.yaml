@@ -111,3 +111,89 @@ child-binding:
         - "1/2"
         - "3/4"
         - "full"
+
+    st,sai-mode:
+      type: string
+      default: "i2s"
+      description: |
+        SAI Block operating mode.
+        - "i2s": standard I2S/PCM audio interface (default).
+        - "pdm": PDM microphone interface. The block demodulates one or more
+          PDM bitstreams into PCM samples in hardware. Only usable on a
+          sub-block that carries the st,sai-pdm-capable property (set at the
+          SoC devicetree level on whichever specific SAI instance/block the
+          silicon wires up for PDM, e.g. SAI1 block A on STM32H5).
+      enum:
+        - "i2s"
+        - "pdm"
+
+    st,sai-pdm-capable:
+      type: boolean
+      description: |
+        Marks this specific SAI sub-block as wired in silicon to the PDM
+        microphone interface. PDM support is not a property of "block A" in
+        general: on a given SoC, only one specific SAI instance/block
+        implements it (e.g. SAI1 block A, never SAI2/SAI3/SAI4 block A).
+        This property belongs in the SoC-level devicetree, not in a board
+        overlay, and gates whether st,sai-mode = "pdm" is accepted.
+
+    st,sai-pdm-mic-pairs:
+      type: int
+      default: 1
+      description: |
+        Number of PDM microphone pairs to capture. Each pair is demodulated
+        into one stereo PCM channel. Only relevant when st,sai-mode = "pdm".
+      enum:
+        - 1
+        - 2
+        - 3
+
+    st,sai-pdm-clock:
+      type: string
+      default: "clock1"
+      description: |
+        PDM clock output(s) driving the microphones (SAI_CKx pins).
+        "clock1" enables CK1 only, "clock2" enables CK2 only, and "both"
+        enables CK1 and CK2 together. CK2 is only needed when capturing
+        more microphone pairs than a single clock domain supports. Only
+        relevant when st,sai-mode = "pdm".
+      enum:
+        - "clock1"
+        - "clock2"
+        - "both"
+
+    st,sai-pdm-volume:
+      type: int
+      default: 16
+      description: |
+        Runtime gain applied by the PDM->PCM decimation filter (ST's
+        OpenPDMFilter, when CONFIG_I2S_STM32_SAI_PDM=y), relative to its
+        fixed full-scale reference of 64. Valid range 0-64; higher values
+        increase gain and clipping risk. Tune per microphone
+        sensitivity/wiring. Only relevant when st,sai-mode = "pdm".
+
+    st,sai-pdm-mono:
+      type: boolean
+      description: |
+        Only one channel of the mic pair (see st,sai-pdm-mono-channel) is
+        physically wired to a real microphone. When set, the PDM->PCM
+        decimation filter (CONFIG_I2S_STM32_SAI_PDM=y) only processes that
+        channel and delivers compact mono PCM, instead of interleaved
+        stereo with noise/garbage in the other channel's slots. Only
+        relevant when st,sai-mode = "pdm".
+
+    st,sai-pdm-mono-channel:
+      type: string
+      default: "a"
+      description: |
+        Which channel of the mic pair the real microphone is wired to, in
+        mono mode (st,sai-pdm-mono). PDM mics that share a clock/data bus
+        pick their slot via a SEL/L-R pin: "a" is the first slot (mic's
+        SEL tied for the falling/first edge), "b" is the second. Getting
+        this wrong means decoding an undriven slot -- plausible-looking
+        but meaningless PCM (no real audio content), not silence or an
+        obvious error. Only relevant when st,sai-mode = "pdm" and
+        st,sai-pdm-mono is set.
+      enum:
+        - "a"
+        - "b"

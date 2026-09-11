@@ -142,6 +142,7 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "disabled";
+				st,sai-pdm-capable;
 			};
 
 			sai1_b: sai1b@40015424 {

@@ -30,3 +30,8 @@ zephyr_library_sources_ifdef(CONFIG_USERSPACE i2s_handlers.c)
 if(CONFIG_I2S_NATIVE_SIM)
   target_sources(native_simulator INTERFACE i2s_native_sim_bottom.c)
 endif()
+
+if(CONFIG_I2S_STM32_SAI_PDM)
+  zephyr_include_directories(${ZEPHYR_HAL_ST_MODULE_DIR}/audio/microphone)
+  zephyr_library_sources(${ZEPHYR_HAL_ST_MODULE_DIR}/audio/microphone/OpenPDMFilter.c)
+endif()

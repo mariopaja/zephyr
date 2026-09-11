@@ -45,4 +45,15 @@ config I2S_STM32_SAI_BLOCK_COUNT
 	int "SAI queue length"
 	default 4
 
+config I2S_STM32_SAI_PDM
+	bool "PDM microphone decimation"
+	help
+	  The SAI PDM interface (st,sai-mode = "pdm") only captures the raw
+	  PDM bitstream into the FIFO in hardware; it does not demodulate it
+	  to PCM. Enable this option to link in ST's OpenPDMFilter library
+	  (from the hal_st module) and decimate the raw bitstream to PCM
+	  samples before handing blocks to i2s_read(). Uses roughly 50 KB of
+	  RAM for filter lookup tables. Currently supports one microphone
+	  pair (stereo) only.
+
 endif # I2S_STM32_SAI
