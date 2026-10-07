@@ -352,12 +352,18 @@ static int lan9250_configure(const struct device *dev)
 
 	/* Configure MAC automatic flow control:
 	 *
+	 *   - Pause or backpressure at 110 * 64 bytes of RX data FIFO usage
+	 *   - Resume at 55 * 64 bytes
+	 *   - Backpressure duration setting 4
+	 *   - Flow control on any frame (enables full duplex pause frames)
+	 *
 	 *  Reference: Microchip Ethernet LAN9250
 	 *  https://github.com/microchip-pic-avr-solutions/ethernet-lan9250/
 	 *  LAN_Regwrite32(AFC_CFG, 0x006E3741);
-	 *
 	 */
-	ret = lan9250_write_sys_reg(dev, LAN9250_AFC_CFG, 0x006e3741);
+	ret = lan9250_write_sys_reg(dev, LAN9250_AFC_CFG,
+				    LAN9250_AFC_CFG_AFC_HI(0x6E) | LAN9250_AFC_CFG_AFC_LO(0x37) |
+					    LAN9250_AFC_CFG_BACK_DUR(4) | LAN9250_AFC_CFG_FCANY);
 	if (ret < 0) {
 		return ret;
 	}
@@ -399,10 +405,12 @@ static int lan9250_configure(const struct device *dev)
 
 	/* Configure RX:
 	 *
-	 *   - RX DMA counter: Ethernet maximum packet size
-	 *   - RX data offset: 4, so that need read dummy before reading data
+	 *   - RX DMA count: 0x600 DWORDs (RX DMA interrupt is not used)
+	 *   - RX data offset: 4 bytes, read as a dummy DWORD before the frame
 	 */
-	ret = lan9250_write_sys_reg(dev, LAN9250_RX_CFG, 0x06000000 | 0x00000400);
+	ret = lan9250_write_sys_reg(dev, LAN9250_RX_CFG,
+				    LAN9250_RX_CFG_RX_DMA_CNT(0x600) |
+					    LAN9250_RX_CFG_RXDOFF(LAN9250_RX_DATA_OFFSET));
 	if (ret < 0) {
 		return ret;
 	}
@@ -458,10 +466,12 @@ static int lan9250_configure(const struct device *dev)
 
 	/* Configure PHY special mode:
 	 *
-	 *   - PHY mode = 111b, enable all capable and auto-nagotiation
+	 *   - PHY mode = 111b, enable all capable and auto-negotiation
 	 *   - PHY address = 1, default value is fixed to 1 by manufacturer
 	 */
-	ret = lan9250_write_phy_reg(dev, LAN9250_PHY_SPECIAL_MODES, 0x00E0 | 1);
+	ret = lan9250_write_phy_reg(dev, LAN9250_PHY_SPECIAL_MODES,
+				    LAN9250_PHY_SPECIAL_MODES_MODE_ALL_AN |
+					    LAN9250_PHY_SPECIAL_MODES_PHYAD(1));
 	if (ret < 0) {
 		return ret;
 	}
@@ -640,7 +650,7 @@ static int lan9250_rx_frame(const struct device *dev)
 		return lan9250_rx_discard(dev, pkt_len);
 	}
 
-	/* Read dummy  data */
+	/* Read dummy data (RX data offset) */
 	ret = lan9250_read_sys_reg(dev, LAN9250_RX_DATA_FIFO, &tmp);
 	if (ret < 0) {
 		return ret;
@@ -1102,13 +1112,13 @@ static int lan9250_init(const struct device *dev)
 	/* SPI config */
 	if (!spi_is_ready_dt(&config->spi)) {
 		LOG_ERR("SPI master port %s not ready", config->spi.bus->name);
-		return -EINVAL;
+		return -ENODEV;
 	}
 
 	/* Initialize GPIO */
 	if (!gpio_is_ready_dt(&config->interrupt)) {
 		LOG_ERR("GPIO port %s not ready", config->interrupt.port->name);
-		return -EINVAL;
+		return -ENODEV;
 	}
 
 	ret = gpio_pin_configure_dt(&config->interrupt, GPIO_INPUT);
@@ -1135,7 +1145,7 @@ static int lan9250_init(const struct device *dev)
 	if (config->reset.port != NULL) {
 		if (!gpio_is_ready_dt(&config->reset)) {
 			LOG_ERR("GPIO port %s not ready", config->reset.port->name);
-			return -EINVAL;
+			return -ENODEV;
 		}
 
 		ret = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_INACTIVE);
