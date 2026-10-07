@@ -700,6 +700,27 @@ static int lan9250_rx(const struct device *dev)
 	return 0;
 }
 
+static int lan9250_tx_status(const struct device *dev, uint8_t count)
+{
+	__maybe_unused struct lan9250_runtime *ctx = dev->data;
+	uint32_t status;
+	int ret;
+
+	for (uint8_t i = 0; i < count; i++) {
+		ret = lan9250_read_sys_reg(dev, LAN9250_TX_STATUS_FIFO, &status);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if ((status & LAN9250_TX_STS_ES) != 0) {
+			LOG_DBG("TX error, status 0x%08x", status);
+			eth_stats_update_errors_tx(ctx->iface);
+		}
+	}
+
+	return 0;
+}
+
 static int lan9250_tx_frame(const struct device *dev, struct net_pkt *pkt)
 {
 	struct lan9250_runtime *ctx = dev->data;
@@ -708,7 +729,6 @@ static int lan9250_tx_frame(const struct device *dev, struct net_pkt *pkt)
 	uint16_t free_size;
 	uint8_t status_size;
 	k_timepoint_t end;
-	uint32_t tmp;
 	int ret;
 
 	if (len > NET_ETH_MAX_FRAME_SIZE) {
@@ -743,9 +763,8 @@ static int lan9250_tx_frame(const struct device *dev, struct net_pkt *pkt)
 	/* TX command 'A' */
 	ret = lan9250_write_sys_reg(
 		dev, LAN9250_TX_DATA_FIFO,
-		LAN9250_TX_CMD_A_INT_ON_COMP | LAN9250_TX_CMD_A_BUFFER_ALIGN_4B |
-			LAN9250_TX_CMD_A_START_OFFSET_0B | LAN9250_TX_CMD_A_FIRST_SEG |
-			LAN9250_TX_CMD_A_LAST_SEG | len);
+		LAN9250_TX_CMD_A_BUFFER_ALIGN_4B | LAN9250_TX_CMD_A_START_OFFSET_0B |
+			LAN9250_TX_CMD_A_FIRST_SEG | LAN9250_TX_CMD_A_LAST_SEG | len);
 	if (ret < 0) {
 		return ret;
 	}
@@ -765,14 +784,8 @@ static int lan9250_tx_frame(const struct device *dev, struct net_pkt *pkt)
 		return ret;
 	}
 
-	for (int i = 0; i < status_size; i++) {
-		ret = lan9250_read_sys_reg(dev, LAN9250_TX_STATUS_FIFO, &tmp);
-		if (ret < 0) {
-			return ret;
-		}
-	}
-
-	return 0;
+	/* Collect the status of previously transmitted frames */
+	return lan9250_tx_status(dev, status_size);
 }
 
 static int lan9250_tx(const struct device *dev, struct net_pkt *pkt)

@@ -37,6 +37,9 @@
 /* TX command 'B' format */
 #define LAN9250_TX_CMD_B_PACKET_TAG 0xFFFF0000
 
+/* TX status format */
+#define LAN9250_TX_STS_ES 0x00008000
+
 /* RX status format */
 #define LAN9250_RX_STS_PACKET_LEN 0x3FFF0000
 #define LAN9250_RX_STS_ES         0x00008000
