@@ -376,11 +376,15 @@ static int lan9250_configure(const struct device *dev)
 		return ret;
 	}
 
-	/* Configure interrupt trigger source, please refer to macro
-	 * LAN9250_INT_SOURCE.
+	/* Configure interrupt sources:
+	 *
+	 *   - PHY interrupt (link up/down)
+	 *   - RX status FIFO level (frame received)
+	 *   - RX and TX errors
 	 */
 	ret = lan9250_write_sys_reg(dev, LAN9250_INT_EN,
-				    LAN9250_INT_EN_PHY_INT_EN | LAN9250_INT_EN_RSFL_EN);
+				    LAN9250_INT_EN_PHY_INT_EN | LAN9250_INT_EN_RSFL_EN |
+					    LAN9250_INT_EN_RXE_INT_EN | LAN9250_INT_EN_TXE_INT_EN);
 	if (ret < 0) {
 		return ret;
 	}
@@ -887,6 +891,7 @@ static int lan9250_handle_link(const struct device *dev)
 
 static int lan9250_handle_irq(const struct device *dev)
 {
+	__maybe_unused struct lan9250_runtime *context = dev->data;
 	uint32_t int_sts;
 	uint32_t ier;
 	int ret;
@@ -913,6 +918,26 @@ static int lan9250_handle_irq(const struct device *dev)
 		ret = lan9250_handle_link(dev);
 		if (ret < 0) {
 			LOG_ERR("PHY interrupt handling failed: %d", ret);
+		}
+	}
+
+	if ((int_sts & (LAN9250_INT_STS_RXE | LAN9250_INT_STS_TXE)) != 0) {
+		/* RXE: RX status FIFO overrun (frames lost) or host FIFO
+		 * underrun. TXE: TX command or length mismatch. The device
+		 * keeps running in both cases.
+		 */
+		LOG_WRN("Error interrupt, INT_STS 0x%08x", int_sts);
+		if ((int_sts & LAN9250_INT_STS_RXE) != 0) {
+			eth_stats_update_errors_rx(context->iface);
+		}
+		if ((int_sts & LAN9250_INT_STS_TXE) != 0) {
+			eth_stats_update_errors_tx(context->iface);
+		}
+
+		ret = lan9250_write_sys_reg(dev, LAN9250_INT_STS,
+					    int_sts & (LAN9250_INT_STS_RXE | LAN9250_INT_STS_TXE));
+		if (ret < 0) {
+			LOG_ERR("Clearing error interrupts failed: %d", ret);
 		}
 	}
 
