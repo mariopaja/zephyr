@@ -1007,6 +1007,7 @@ static void lan9250_iface_init(struct net_if *iface)
 			CONFIG_ETH_LAN9250_RX_THREAD_STACK_SIZE,
 			lan9250_thread, (void *)dev, NULL, NULL,
 			K_PRIO_COOP(CONFIG_ETH_LAN9250_RX_THREAD_PRIO), 0, K_NO_WAIT);
+	k_thread_name_set(&context->thread, "lan9250");
 }
 
 static int lan9250_set_promisc(const struct device *dev, bool enable)

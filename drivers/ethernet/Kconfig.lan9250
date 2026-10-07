@@ -18,10 +18,13 @@ if ETH_LAN9250
 
 config ETH_LAN9250_RX_THREAD_STACK_SIZE
 	int "Stack size for internal incoming packet handler"
-	default 800
+	default 1024
 	help
 	  Size of the stack used for internal thread which is ran for
-	  incoming packet processing.
+	  incoming packet processing. The thread handles all device
+	  interrupts, including PHY and MAC register accesses over SPI.
+	  Increase it when NET_TC_RX_COUNT is 0, as received packets are
+	  then processed by the network stack in this thread.
 
 config ETH_LAN9250_RX_THREAD_PRIO
 	int "Priority for internal incoming packet handler"
