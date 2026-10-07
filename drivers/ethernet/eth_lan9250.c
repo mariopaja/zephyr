@@ -26,24 +26,33 @@ LOG_MODULE_REGISTER(eth_lan9250, CONFIG_ETHERNET_LOG_LEVEL);
 #define LAN9250_RX_MIN_LEN     (sizeof(struct net_eth_hdr) + LAN9250_CRC_LEN)
 #define LAN9250_RX_MAX_LEN     (NET_ETH_MAX_FRAME_SIZE + LAN9250_CRC_LEN)
 
-static int lan9250_write_sys_reg(const struct device *dev, uint16_t address, uint32_t data)
+static int lan9250_spi_check(const struct device *dev)
 {
 	const struct lan9250_config *config = dev->config;
-	uint8_t cmd[1] = {LAN9250_SPI_INSTR_WRITE};
-	uint8_t addr[2];
-	uint8_t instr[4];
-	struct spi_buf tx_buf[3];
-	const struct spi_buf_set tx = {.buffers = tx_buf, .count = 3};
 
-	sys_put_be16(address, addr);
-	sys_put_le32(data, instr);
+	if (!spi_is_ready_dt(&config->spi)) {
+		LOG_ERR("SPI master port %s not ready", config->spi.bus->name);
+		return -ENODEV;
+	}
 
-	tx_buf[0].buf = &cmd;
-	tx_buf[0].len = ARRAY_SIZE(cmd);
-	tx_buf[1].buf = addr;
-	tx_buf[1].len = ARRAY_SIZE(addr);
-	tx_buf[2].buf = instr;
-	tx_buf[2].len = ARRAY_SIZE(instr);
+	return 0;
+}
+
+static int lan9250_spi_write(const struct device *dev, uint16_t address, const uint8_t *data,
+			     size_t len)
+{
+	const struct lan9250_config *config = dev->config;
+	/* Instruction and address */
+	uint8_t hdr[3] = {LAN9250_SPI_INSTR_WRITE};
+	struct spi_buf tx_buf[2];
+	const struct spi_buf_set tx = {.buffers = tx_buf, .count = 2};
+
+	sys_put_be16(address, &hdr[1]);
+
+	tx_buf[0].buf = hdr;
+	tx_buf[0].len = sizeof(hdr);
+	tx_buf[1].buf = (uint8_t *)data;
+	tx_buf[1].len = len;
 
 	return spi_write_dt(&config->spi, &tx);
 }
@@ -51,7 +60,7 @@ static int lan9250_write_sys_reg(const struct device *dev, uint16_t address, uin
 /* Read data using the SPI Read instruction (up to 30 MHz) or, if enabled,
  * the Fast Read instruction (up to 80 MHz), which needs one dummy byte.
  */
-static int lan9250_read(const struct device *dev, uint16_t address, uint8_t *data, size_t len)
+static int lan9250_spi_read(const struct device *dev, uint16_t address, uint8_t *data, size_t len)
 {
 	const struct lan9250_config *config = dev->config;
 	const bool fast = IS_ENABLED(CONFIG_ETH_LAN9250_SPI_FAST_READ);
@@ -76,6 +85,36 @@ static int lan9250_read(const struct device *dev, uint16_t address, uint8_t *dat
 	rx_buf[1].len = len;
 
 	return spi_transceive_dt(&config->spi, &tx, &rx);
+}
+
+static const struct lan9250_bus_ops lan9250_spi_ops = {
+	.check = lan9250_spi_check,
+	.read = lan9250_spi_read,
+	.write = lan9250_spi_write,
+};
+
+static int lan9250_read(const struct device *dev, uint16_t address, uint8_t *data, size_t len)
+{
+	const struct lan9250_config *config = dev->config;
+
+	return config->bus->read(dev, address, data, len);
+}
+
+static int lan9250_write(const struct device *dev, uint16_t address, const uint8_t *data,
+			 size_t len)
+{
+	const struct lan9250_config *config = dev->config;
+
+	return config->bus->write(dev, address, data, len);
+}
+
+static int lan9250_write_sys_reg(const struct device *dev, uint16_t address, uint32_t value)
+{
+	uint8_t data[4];
+
+	sys_put_le32(value, data);
+
+	return lan9250_write(dev, address, data, sizeof(data));
 }
 
 static int lan9250_read_sys_reg(const struct device *dev, uint16_t address, uint32_t *value)
@@ -576,20 +615,7 @@ static int lan9250_configure(const struct device *dev)
 
 static int lan9250_write_buf(const struct device *dev, uint8_t *data_buffer, uint16_t buf_len)
 {
-	const struct lan9250_config *config = dev->config;
-	uint8_t cmd[1] = {LAN9250_SPI_INSTR_WRITE};
-	uint8_t instr[2] = {(LAN9250_TX_DATA_FIFO >> 8) & 0xFF, (LAN9250_TX_DATA_FIFO & 0xFF)};
-	struct spi_buf tx_buf[3];
-	const struct spi_buf_set tx = {.buffers = tx_buf, .count = 3};
-
-	tx_buf[0].buf = &cmd;
-	tx_buf[0].len = ARRAY_SIZE(cmd);
-	tx_buf[1].buf = &instr;
-	tx_buf[1].len = ARRAY_SIZE(instr);
-	tx_buf[2].buf = data_buffer;
-	tx_buf[2].len = buf_len;
-
-	return spi_transceive_dt(&config->spi, &tx, NULL);
+	return lan9250_write(dev, LAN9250_TX_DATA_FIFO, data_buffer, buf_len);
 }
 
 static int lan9250_read_buf(const struct device *dev, uint8_t *data_buffer, uint16_t buf_len)
@@ -1109,10 +1135,9 @@ static int lan9250_init(const struct device *dev)
 	const struct lan9250_config *config = dev->config;
 	struct lan9250_runtime *context = dev->data;
 
-	/* SPI config */
-	if (!spi_is_ready_dt(&config->spi)) {
-		LOG_ERR("SPI master port %s not ready", config->spi.bus->name);
-		return -ENODEV;
+	ret = config->bus->check(dev);
+	if (ret < 0) {
+		return ret;
 	}
 
 	/* Initialize GPIO */
@@ -1196,6 +1221,7 @@ static int lan9250_init(const struct device *dev)
 	};                                                                                         \
                                                                                                    \
 	static const struct lan9250_config lan9250_##inst##_config = {                             \
+		.bus = &lan9250_spi_ops,                                                           \
 		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),                                \
 		.interrupt = GPIO_DT_SPEC_INST_GET(inst, int_gpios),                               \
 		.reset = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {0}),                         \

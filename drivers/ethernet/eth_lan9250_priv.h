@@ -350,7 +350,18 @@
 #define LAN9250_ID_REV_CHIP_ID_DEFAULT 0x92500000
 #define LAN9250_ID_REV_CHIP_REV        0x0000FFFF
 
+struct lan9250_bus_ops {
+	/* Check that the bus is ready and prepare it for the device */
+	int (*check)(const struct device *dev);
+	/* Read len bytes starting at the system register or FIFO address */
+	int (*read)(const struct device *dev, uint16_t address, uint8_t *data, size_t len);
+	/* Write len bytes starting at the system register or FIFO address */
+	int (*write)(const struct device *dev, uint16_t address, const uint8_t *data,
+		     size_t len);
+};
+
 struct lan9250_config {
+	const struct lan9250_bus_ops *bus;
 	struct spi_dt_spec spi;
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
