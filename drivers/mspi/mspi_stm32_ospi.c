@@ -126,11 +126,16 @@ static bool mspi_stm32_ospi_is_inp(const struct device *controller)
 
 static uint32_t mspi_stm32_ospi_hal_address_size(uint8_t address_length)
 {
-	if (address_length == 4U) {
+	switch (address_length) {
+	case 1U:
+		return HAL_OSPI_ADDRESS_8_BITS;
+	case 2U:
+		return HAL_OSPI_ADDRESS_16_BITS;
+	case 4U:
 		return HAL_OSPI_ADDRESS_32_BITS;
+	default:
+		return HAL_OSPI_ADDRESS_24_BITS;
 	}
-
-	return HAL_OSPI_ADDRESS_24_BITS;
 }
 
 /*

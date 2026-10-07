@@ -218,6 +218,20 @@ static hal_xspi_regular_cmd_t mspi_stm32_xspi_prepare_cmd(uint8_t cfg_mode, uint
 	return cmd_tmp;
 }
 
+static uint32_t mspi_stm32_xspi_hal_addr_width(uint8_t addr_length)
+{
+	switch (addr_length) {
+	case 1U:
+		return HAL_XSPI_ADDR_8BIT;
+	case 2U:
+		return HAL_XSPI_ADDR_16BIT;
+	case 4U:
+		return HAL_XSPI_ADDR_32BIT;
+	default:
+		return HAL_XSPI_ADDR_24BIT;
+	}
+}
+
 static int mspi_stm32_xspi_send_cmd(const struct device *dev, uint8_t io_mode, uint8_t data_rate,
 				    const struct mspi_stm32_xspi_cmd *cmd)
 {
@@ -248,8 +262,7 @@ static int mspi_stm32_xspi_send_cmd(const struct device *dev, uint8_t io_mode, u
 		/* READ_CFG/WRITE_CFG at DTR rates keep the 32-bit width
 		 * set by prepare_cmd.
 		 */
-		hal_cmd.addr_width = (cmd->addr_length == 4U) ? HAL_XSPI_ADDR_32BIT
-							      : HAL_XSPI_ADDR_24BIT;
+		hal_cmd.addr_width = mspi_stm32_xspi_hal_addr_width(cmd->addr_length);
 	}
 
 	if (cmd->data_none) {
@@ -596,6 +609,20 @@ static XSPI_RegularCmdTypeDef mspi_stm32_xspi_prepare_cmd(uint8_t cfg_mode, uint
 	return cmd_tmp;
 }
 
+static uint32_t mspi_stm32_xspi_hal_addr_width(uint8_t addr_length)
+{
+	switch (addr_length) {
+	case 1U:
+		return HAL_XSPI_ADDRESS_8_BITS;
+	case 2U:
+		return HAL_XSPI_ADDRESS_16_BITS;
+	case 4U:
+		return HAL_XSPI_ADDRESS_32_BITS;
+	default:
+		return HAL_XSPI_ADDRESS_24_BITS;
+	}
+}
+
 static int mspi_stm32_xspi_send_cmd(const struct device *dev, uint8_t io_mode, uint8_t data_rate,
 				    const struct mspi_stm32_xspi_cmd *cmd)
 {
@@ -626,8 +653,7 @@ static int mspi_stm32_xspi_send_cmd(const struct device *dev, uint8_t io_mode, u
 		/* READ_CFG/WRITE_CFG at DTR rates keep the 32-bit width
 		 * set by prepare_cmd.
 		 */
-		hal_cmd.AddressWidth = (cmd->addr_length == 4U) ? HAL_XSPI_ADDRESS_32_BITS
-								: HAL_XSPI_ADDRESS_24_BITS;
+		hal_cmd.AddressWidth = mspi_stm32_xspi_hal_addr_width(cmd->addr_length);
 	}
 
 	if (cmd->data_none) {
@@ -1170,17 +1196,12 @@ indirect:
 		.op_type = MSPI_STM32_XSPI_CMD_COMMON_CFG,
 		.instruction = packet->cmd,
 		.addr = packet->address,
-		.addr_length = (dev_data->ctx.xfer.addr_length == 4U) ? 4U : 3U,
+		.addr_length = dev_data->ctx.xfer.addr_length,
 		.dummy_cycles = (packet->dir == MSPI_TX) ? dev_data->ctx.xfer.tx_dummy
 							 : dev_data->ctx.xfer.rx_dummy,
 		.num_bytes = packet->num_bytes,
 		.data_none = (packet->num_bytes == 0U),
 	};
-
-	if (dev_data->ctx.xfer.addr_length == 0) {
-		/* Commands without an address phase, e.g. RDID or WREN */
-		cmd.addr_length = 0;
-	}
 
 	LOG_DBG("MSPI access Instruction 0x%x", packet->cmd);
 
