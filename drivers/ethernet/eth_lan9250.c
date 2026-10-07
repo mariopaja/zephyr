@@ -11,7 +11,6 @@
 #include <string.h>
 #include <errno.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/net_if.h>
@@ -26,6 +25,7 @@ LOG_MODULE_REGISTER(eth_lan9250, CONFIG_ETHERNET_LOG_LEVEL);
 #define LAN9250_RX_MIN_LEN     (sizeof(struct net_eth_hdr) + LAN9250_CRC_LEN)
 #define LAN9250_RX_MAX_LEN     (NET_ETH_MAX_FRAME_SIZE + LAN9250_CRC_LEN)
 
+#if LAN9250_BUS_SPI
 static int lan9250_spi_check(const struct device *dev)
 {
 	const struct lan9250_config *config = dev->config;
@@ -92,6 +92,161 @@ static const struct lan9250_bus_ops lan9250_spi_ops = {
 	.read = lan9250_spi_read,
 	.write = lan9250_spi_write,
 };
+#endif /* LAN9250_BUS_SPI */
+
+#if LAN9250_BUS_MSPI
+#define LAN9250_MSPI_TIMEOUT         MIN(100, CONFIG_MSPI_COMPLETION_TIMEOUT_TOLERANCE)
+#define LAN9250_MSPI_RELEASE_RETRIES 100
+
+/* End the controller session started by mspi_dev_config() */
+static int lan9250_mspi_release(const struct device *dev)
+{
+	const struct lan9250_config *config = dev->config;
+	int ret;
+
+	for (int i = 0; i < LAN9250_MSPI_RELEASE_RETRIES; i++) {
+		ret = mspi_get_channel_status(config->mspi, 0);
+		if (ret != -EBUSY) {
+			return ret;
+		}
+
+		k_yield();
+	}
+
+	return -EBUSY;
+}
+
+static int lan9250_mspi_xfer(const struct device *dev, enum mspi_xfer_direction dir,
+			     uint16_t address, uint8_t *data, size_t len)
+{
+	const struct lan9250_config *config = dev->config;
+	struct lan9250_runtime *ctx = dev->data;
+	const struct mspi_xfer_packet packet = {
+		.dir = dir,
+		.cb_mask = MSPI_BUS_NO_CB,
+		.cmd = (dir == MSPI_RX) ? ctx->mspi_cfg.read_cmd : ctx->mspi_cfg.write_cmd,
+		.address = address,
+		.num_bytes = len,
+		.data_buf = data,
+	};
+	const struct mspi_xfer xfer = {
+		.async = false,
+		.xfer_mode = MSPI_PIO,
+		.rx_dummy = ctx->mspi_cfg.rx_dummy,
+		.tx_dummy = ctx->mspi_cfg.tx_dummy,
+		.cmd_length = ctx->mspi_cfg.cmd_length,
+		.addr_length = ctx->mspi_cfg.addr_length,
+		.priority = MSPI_XFER_PRIORITY_MEDIUM,
+		.packets = &packet,
+		.num_packet = 1,
+		.timeout = LAN9250_MSPI_TIMEOUT,
+	};
+	int release_ret;
+	int ret;
+
+	/* Other devices may have changed the controller configuration when
+	 * the controller is shared, so restore it in that case.
+	 */
+	if (config->mspi_sw_multi_periph) {
+		ret = mspi_dev_config(config->mspi, &config->mspi_id, MSPI_DEVICE_CONFIG_ALL,
+				      &ctx->mspi_cfg);
+	} else {
+		ret = mspi_dev_config(config->mspi, &config->mspi_id, MSPI_DEVICE_CONFIG_NONE,
+				      NULL);
+	}
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = mspi_transceive(config->mspi, &config->mspi_id, &xfer);
+	release_ret = lan9250_mspi_release(dev);
+
+	return (ret < 0) ? ret : release_ret;
+}
+
+static int lan9250_mspi_read(const struct device *dev, uint16_t address, uint8_t *data,
+			     size_t len)
+{
+	return lan9250_mspi_xfer(dev, MSPI_RX, address, data, len);
+}
+
+static int lan9250_mspi_write(const struct device *dev, uint16_t address, const uint8_t *data,
+			      size_t len)
+{
+	return lan9250_mspi_xfer(dev, MSPI_TX, address, (uint8_t *)data, len);
+}
+
+static int lan9250_mspi_check(const struct device *dev)
+{
+	const struct lan9250_config *config = dev->config;
+	struct lan9250_runtime *ctx = dev->data;
+	struct mspi_dev_cfg *cfg = &ctx->mspi_cfg;
+	int ret;
+
+	if (!device_is_ready(config->mspi)) {
+		LOG_ERR("MSPI controller %s not ready", config->mspi->name);
+		return -ENODEV;
+	}
+
+	*cfg = config->mspi_cfg;
+
+	switch (cfg->io_mode) {
+	case MSPI_IO_MODE_SINGLE:
+		cfg->read_cmd = LAN9250_SPI_INSTR_FAST_READ;
+		cfg->write_cmd = LAN9250_SPI_INSTR_WRITE;
+		break;
+	case MSPI_IO_MODE_DUAL_1_1_2:
+		cfg->read_cmd = LAN9250_SPI_INSTR_SDOR;
+		cfg->write_cmd = LAN9250_SPI_INSTR_SDDW;
+		break;
+	case MSPI_IO_MODE_DUAL_1_2_2:
+		cfg->read_cmd = LAN9250_SPI_INSTR_SDIOR;
+		cfg->write_cmd = LAN9250_SPI_INSTR_SDADW;
+		break;
+	case MSPI_IO_MODE_QUAD_1_1_4:
+		cfg->read_cmd = LAN9250_SPI_INSTR_SQOR;
+		cfg->write_cmd = LAN9250_SPI_INSTR_SQDW;
+		break;
+	case MSPI_IO_MODE_QUAD_1_4_4:
+		cfg->read_cmd = LAN9250_SPI_INSTR_SQIOR;
+		cfg->write_cmd = LAN9250_SPI_INSTR_SQADW;
+		break;
+	default:
+		LOG_ERR("Unsupported MSPI I/O mode %d", cfg->io_mode);
+		return -ENOTSUP;
+	}
+
+	if (cfg->data_rate != MSPI_DATA_RATE_SINGLE) {
+		LOG_ERR("Unsupported MSPI data rate %d", cfg->data_rate);
+		return -ENOTSUP;
+	}
+
+	if ((cfg->cpp != MSPI_CPP_MODE_0) && (cfg->cpp != MSPI_CPP_MODE_3)) {
+		LOG_ERR("Unsupported MSPI clock mode %d", cfg->cpp);
+		return -ENOTSUP;
+	}
+
+	/* 1 byte instruction, 2 byte address, dummy clocks on reads only */
+	cfg->cmd_length = 1;
+	cfg->addr_length = 2;
+	cfg->rx_dummy = LAN9250_SPI_READ_DUMMY_CLOCKS;
+	cfg->tx_dummy = 0;
+
+	ret = mspi_dev_config(config->mspi, &config->mspi_id, MSPI_DEVICE_CONFIG_ALL, cfg);
+	if (ret < 0) {
+		LOG_ERR("MSPI device configuration failed: %d", ret);
+		return ret;
+	}
+
+	return lan9250_mspi_release(dev);
+}
+
+static const struct lan9250_bus_ops lan9250_mspi_ops = {
+	.check = lan9250_mspi_check,
+	.read = lan9250_mspi_read,
+	.write = lan9250_mspi_write,
+};
+#endif /* LAN9250_BUS_MSPI */
 
 static int lan9250_read(const struct device *dev, uint16_t address, uint8_t *data, size_t len)
 {
@@ -1214,6 +1369,21 @@ static int lan9250_init(const struct device *dev)
 	return 0;
 }
 
+#define LAN9250_SPI_CONFIG(inst)                                                                   \
+	.bus = &lan9250_spi_ops,                                                                   \
+	.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),
+
+#define LAN9250_MSPI_CONFIG(inst)                                                                  \
+	.bus = &lan9250_mspi_ops,                                                                  \
+	.mspi = DEVICE_DT_GET(DT_INST_BUS(inst)),                                                  \
+	.mspi_id = MSPI_DEVICE_ID_DT_INST(inst),                                                   \
+	.mspi_cfg = MSPI_DEVICE_CONFIG_DT_INST(inst),                                              \
+	.mspi_sw_multi_periph = DT_PROP(DT_INST_BUS(inst), software_multiperipheral),
+
+#define LAN9250_BUS_CONFIG(inst)                                                                   \
+	COND_CODE_1(DT_INST_ON_BUS(inst, mspi), (LAN9250_MSPI_CONFIG(inst)),                       \
+		    (LAN9250_SPI_CONFIG(inst)))
+
 #define LAN9250_DEFINE(inst)                                                                       \
 	static struct lan9250_runtime lan9250_##inst##_runtime = {                                 \
 		.lock = Z_MUTEX_INITIALIZER(lan9250_##inst##_runtime.lock),                        \
@@ -1221,8 +1391,7 @@ static int lan9250_init(const struct device *dev)
 	};                                                                                         \
                                                                                                    \
 	static const struct lan9250_config lan9250_##inst##_config = {                             \
-		.bus = &lan9250_spi_ops,                                                           \
-		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),                                \
+		LAN9250_BUS_CONFIG(inst)                                                           \
 		.interrupt = GPIO_DT_SPEC_INST_GET(inst, int_gpios),                               \
 		.reset = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {0}),                         \
 		.mac_cfg = NET_ETH_MAC_DT_INST_CONFIG_INIT(inst),                                  \

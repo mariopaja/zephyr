@@ -1,0 +1,9 @@
+# Copyright (c) 2024, Mario Paja
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+    LAN9250 standalone 10/100BASE-T Ethernet controller with SPI interface
+
+compatible: "microchip,lan9250"
+
+include: [spi-device.yaml, "microchip,lan9250-common.yaml"]

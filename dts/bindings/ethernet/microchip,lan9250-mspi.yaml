@@ -1,0 +1,23 @@
+# Copyright (c) 2026, Mario Paja
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+    LAN9250 standalone 10/100BASE-T Ethernet controller on a multi-bit
+    SPI (MSPI) controller, such as an STM32 OCTOSPI or XSPI.
+
+    Supported values of mspi-io-mode are MSPI_IO_MODE_SINGLE (1-1-1),
+    MSPI_IO_MODE_DUAL_1_1_2, MSPI_IO_MODE_DUAL_1_2_2,
+    MSPI_IO_MODE_QUAD_1_1_4 and MSPI_IO_MODE_QUAD_1_4_4, at single data
+    rate and in clock mode 0 or 3. The driver selects the matching read
+    and write instructions, the 8 dummy clocks of the read instructions,
+    a 1 byte instruction and a 2 byte address, so read-command,
+    write-command, rx-dummy, command-length and address-length do not
+    need to be set.
+
+    The LAN9250 drives read data up to 11 ns after the clock edge, so
+    above about 40 MHz the controller must delay its sampling point, for
+    example with st,ssht-enable on an STM32 OCTOSPI or XSPI controller.
+
+compatible: "microchip,lan9250"
+
+include: [mspi-device.yaml, "microchip,lan9250-common.yaml"]

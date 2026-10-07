@@ -7,10 +7,19 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/spi.h>
 
 #ifndef _LAN9250_
 #define _LAN9250_
+
+#define LAN9250_BUS_SPI  DT_ANY_INST_ON_BUS_STATUS_OKAY(spi)
+#define LAN9250_BUS_MSPI DT_ANY_INST_ON_BUS_STATUS_OKAY(mspi)
+
+#if LAN9250_BUS_SPI
+#include <zephyr/drivers/spi.h>
+#endif
+#if LAN9250_BUS_MSPI
+#include <zephyr/drivers/mspi.h>
+#endif
 
 #define LAN9250_DEFAULT_NUMOF_RETRIES 3U
 #define LAN9250_PHY_TIMEOUT           2000
@@ -26,6 +35,17 @@
 #define LAN9250_SPI_INSTR_WRITE     0x02
 #define LAN9250_SPI_INSTR_READ      0x03
 #define LAN9250_SPI_INSTR_FAST_READ 0x0B
+/* Dual and quad SPI instructions (command-address-data bit widths) */
+#define LAN9250_SPI_INSTR_SDOR      0x3B /* 1-1-2 read */
+#define LAN9250_SPI_INSTR_SDIOR     0xBB /* 1-2-2 read */
+#define LAN9250_SPI_INSTR_SQOR      0x6B /* 1-1-4 read */
+#define LAN9250_SPI_INSTR_SQIOR     0xEB /* 1-4-4 read */
+#define LAN9250_SPI_INSTR_SDDW      0x32 /* 1-1-2 write */
+#define LAN9250_SPI_INSTR_SDADW     0xB2 /* 1-2-2 write */
+#define LAN9250_SPI_INSTR_SQDW      0x62 /* 1-1-4 write */
+#define LAN9250_SPI_INSTR_SQADW     0xE2 /* 1-4-4 write */
+/* Dummy clocks of all fast, dual and quad read instructions in SPI mode */
+#define LAN9250_SPI_READ_DUMMY_CLOCKS 8U
 
 /* TX command 'A' format */
 #define LAN9250_TX_CMD_A_INT_ON_COMP     0x80000000
@@ -362,7 +382,15 @@ struct lan9250_bus_ops {
 
 struct lan9250_config {
 	const struct lan9250_bus_ops *bus;
+#if LAN9250_BUS_SPI
 	struct spi_dt_spec spi;
+#endif
+#if LAN9250_BUS_MSPI
+	const struct device *mspi;
+	struct mspi_dev_id mspi_id;
+	struct mspi_dev_cfg mspi_cfg;
+	bool mspi_sw_multi_periph;
+#endif
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
 	struct net_eth_mac_config mac_cfg;
@@ -379,6 +407,10 @@ struct lan9250_runtime {
 	struct gpio_callback gpio_cb;
 	struct k_mutex lock;
 	struct k_sem int_sem;
+#if LAN9250_BUS_MSPI
+	/* MSPI device configuration completed with the LAN9250 instructions */
+	struct mspi_dev_cfg mspi_cfg;
+#endif
 	/* Largest TX frame or RX frame with CRC, DWORD-aligned */
 	uint8_t buf[LAN9250_ALIGN(NET_ETH_MAX_FRAME_SIZE + LAN9250_CRC_LEN)];
 };

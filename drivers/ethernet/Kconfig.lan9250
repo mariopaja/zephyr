@@ -9,10 +9,11 @@ menuconfig ETH_LAN9250
 	default y
 	depends on DT_HAS_MICROCHIP_LAN9250_ENABLED
 	select GPIO
-	select SPI
+	select SPI if $(dt_compat_on_bus,$(DT_COMPAT_MICROCHIP_LAN9250),spi)
+	select MSPI if $(dt_compat_on_bus,$(DT_COMPAT_MICROCHIP_LAN9250),mspi)
 	help
 	  LAN9250 Stand-Alone Ethernet Controller
-	  with SPI Interface
+	  with SPI Interface, connected to an SPI or MSPI controller
 
 if ETH_LAN9250
 
@@ -40,7 +41,9 @@ config ETH_LAN9250_SPI_FAST_READ
 	  Read registers and the RX data FIFO with the SPI Fast Read
 	  instruction (0x0B), which supports SPI clock rates up to 80 MHz.
 	  The Read instruction (0x03) is limited to 30 MHz. Fast Read adds
-	  one dummy byte to each read transfer.
+	  one dummy byte to each read transfer. Only used for devices on an
+	  SPI controller, devices on an MSPI controller always use Fast Read
+	  or the dual and quad read instructions.
 
 config ETH_LAN9250_BUF_ALLOC_TIMEOUT
 	int "Network buffer allocation timeout"
