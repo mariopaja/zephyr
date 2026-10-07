@@ -47,8 +47,9 @@ DT_INST_FOREACH_CHILD_STATUS_OKAY(index, MSPI_STM32_IS_SUPPORTED_CHILD)
  *
  * MSPI_STM32_INST_MEM_ADDR_BITS() expands to the number of address bits
  * of the memory device (log2 of its size in bytes), derived from the
- * child's "size" property (in bits). If the
- * controller has no enabled child, it expands to @p fallback_bits.
+ * child's "size" property (in bits). If the controller has no enabled
+ * child, or the child has no "size" property (a device that is not a
+ * memory), it expands to @p fallback_bits.
  *
  * Note that the HAL encodings differ for each IP:
  *   XSPI  Init.MemorySize = address bits - 1 (raw DCR1 DEVSIZE)
@@ -58,14 +59,17 @@ DT_INST_FOREACH_CHILD_STATUS_OKAY(index, MSPI_STM32_IS_SUPPORTED_CHILD)
 #define MSPI_STM32_MEM_SIZE_BITS(child)                                        \
 	DT_PROP_OR(child, size, 0)
 
-#define MSPI_STM32_MEM_ADDR_BITS_ENTRY(child)                                  \
-	(LOG2(MSPI_STM32_MEM_SIZE_BITS(child)) - 3),
+#define MSPI_STM32_MEM_ADDR_BITS_ENTRY(child, fallback_bits)                   \
+	COND_CODE_1(DT_NODE_HAS_PROP(child, size),                             \
+		    ((LOG2(MSPI_STM32_MEM_SIZE_BITS(child)) - 3)),             \
+		    ((fallback_bits))),
 
 #define MSPI_STM32_INST_MEM_ADDR_BITS(index, fallback_bits)                    \
 	COND_CODE_0(DT_INST_CHILD_NUM_STATUS_OKAY(index),                      \
 		    (fallback_bits),                                           \
-		    (GET_ARG_N(1, DT_INST_FOREACH_CHILD_STATUS_OKAY(index,     \
-					MSPI_STM32_MEM_ADDR_BITS_ENTRY))))
+		    (GET_ARG_N(1, DT_INST_FOREACH_CHILD_STATUS_OKAY_VARGS(     \
+					index, MSPI_STM32_MEM_ADDR_BITS_ENTRY, \
+					fallback_bits))))
 
 
 #if defined(CONFIG_MSPI_STM32_OSPI)
