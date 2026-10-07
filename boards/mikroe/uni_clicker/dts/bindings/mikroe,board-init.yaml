@@ -1,0 +1,25 @@
+# Copyright (c) 2025 Mario Paja
+# SPDX-License-Identifier: Apache-2.0
+
+description: MikroE UNI Clicker USB power switch and ID control
+
+compatible: "mikroe,board-init"
+
+include: base.yaml
+
+properties:
+  usb-psw-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIOs for USB power switch control.
+      LOW logic level (0) : USB HOST
+      HIGH logic level (1): USB DEVICE
+
+  usb-id-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      USB ID pin is used to detect the type of the device attached to the USB port
+      LOW logic level (0) : USB HOST
+      HIGH logic level (1): USB DEVICE
