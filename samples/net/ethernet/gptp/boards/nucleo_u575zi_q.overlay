@@ -1,0 +1,39 @@
+/*
+ * Copyright (c) 2026 Mario Paja
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * LAN9250 (e.g. MIKROE ETH 3 Click) on the Arduino SPI of the NUCLEO-U575ZI-Q.
+ *
+ * SPI1 is set up by the board on the Arduino header:
+ *   SCK = D13 (PA5), MISO = D12 (PA6), MOSI = D11 (PA7), CS = D10 (PD14)
+ *
+ * Interrupt on D9 (PD15) and reset on D8 (PF12).
+ *
+ * SPI1 runs from PCLK2 (160 MHz) with a power of two prescaler, so 40 MHz
+ * is used. SPI1 transfers use GPDMA1.
+ */
+
+#include <freq.h>
+#include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
+
+&gpdma1 {
+	status = "okay";
+};
+
+&arduino_spi {
+	dmas = <&gpdma1 0 7 STM32_DMA_PERIPH_TX>,
+	       <&gpdma1 1 6 STM32_DMA_PERIPH_RX>;
+	dma-names = "tx", "rx";
+	status = "okay";
+
+	lan9250: ethernet@0 {
+		compatible = "microchip,lan9250";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(40)>;
+		int-gpios = <&arduino_header ARDUINO_HEADER_R3_D9 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&arduino_header ARDUINO_HEADER_R3_D8 GPIO_ACTIVE_LOW>;
+		local-mac-address = [02 00 00 92 50 01];
+		status = "okay";
+	};
+};
