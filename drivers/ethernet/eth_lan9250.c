@@ -411,13 +411,19 @@ static int lan9250_configure(const struct device *dev)
 	 *   - Energy-detect
 	 *   - Wake on
 	 *   - Clear wakeon
+	 *
+	 * The 1588 clock disable bits are only set when written as 1 two
+	 * consecutive times.
 	 */
-	ret = lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL,
-				    LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_1588_DIS |
-					    LAN9250_PMT_CTRL_1588_TSU_DIS |
-					    LAN9250_PMT_CTRL_WOL_EN | LAN9250_PMT_CTRL_WOL_STS);
-	if (ret < 0) {
-		return ret;
+	for (int i = 0; i < 2; i++) {
+		ret = lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL,
+					    LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_1588_DIS |
+						    LAN9250_PMT_CTRL_1588_TSU_DIS |
+						    LAN9250_PMT_CTRL_WOL_EN |
+						    LAN9250_PMT_CTRL_WOL_STS);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	/* Configure PHY auto-negotiation advertisement capability:
