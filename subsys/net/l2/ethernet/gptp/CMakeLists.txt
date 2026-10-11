@@ -13,3 +13,5 @@ zephyr_library_sources(
   gptp_messages.c
   gptp_mi.c
   )
+
+zephyr_library_sources_ifdef(CONFIG_NET_GPTP_PORT_CLOCK_SYNC gptp_port_clock.c)

@@ -142,6 +142,44 @@ config NET_GPTP_USE_DEFAULT_CLOCK_UPDATE
 	help
 	  Use a default internal function to update port local clock.
 
+config NET_GPTP_PORT_CLOCK_SYNC
+	bool "Synchronize the clocks of the gPTP ports"
+	depends on NET_GPTP_USE_DEFAULT_CLOCK_UPDATE
+	depends on NET_GPTP_NUM_PORTS > 1
+	help
+	  Keep the PTP clocks of all gPTP ports synchronized to the clock of
+	  the time receiver port, or of the first port if there is no time
+	  receiver port. A time-aware relay computes the residence time of
+	  a Sync message from timestamps of two ports, and a grandmaster
+	  sends origin timestamps from the clock of each port, so this is
+	  needed when the ports do not share one PTP clock, for example
+	  with two Ethernet controllers. Ports using the clock device of the
+	  reference port are skipped.
+	  The offset is measured by reading the reference clock before and
+	  after the port clock, so its accuracy is limited by the read
+	  latency of the clocks.
+
+if NET_GPTP_PORT_CLOCK_SYNC
+
+config NET_GPTP_PORT_CLOCK_SYNC_INTERVAL
+	int "Port clock synchronization interval (ms)"
+	default 1000
+	range 10 60000
+	help
+	  Interval between two updates of the port clocks. The PI
+	  controller gains are those of the gPTP clock update, which are
+	  tuned for one update per second.
+
+config NET_GPTP_PORT_CLOCK_SYNC_SAMPLES
+	int "Port clock offset samples"
+	default 5
+	range 1 100
+	help
+	  Number of offset measurements per update. The measurement with
+	  the shortest read window of the reference clock is used.
+
+endif # NET_GPTP_PORT_CLOCK_SYNC
+
 config NET_GPTP_PATH_TRACE_ELEMENTS
 	int "How many path trace elements to track"
 	default 8

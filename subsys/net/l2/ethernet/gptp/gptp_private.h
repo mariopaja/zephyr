@@ -49,6 +49,13 @@ struct gptp_clock_data {
 extern struct gptp_clock_data gptp_clock;
 
 /**
+ * @brief Synchronize the port clocks to the reference port clock.
+ *
+ * Runs at most once per CONFIG_NET_GPTP_PORT_CLOCK_SYNC_INTERVAL.
+ */
+void gptp_port_clock_sync(void);
+
+/**
  * @brief Is a slave acting as a slave.
  *
  * Utility to check if a port is configured as a slave.

@@ -593,6 +593,10 @@ static void gptp_state_machine(void)
 	}
 
 	gptp_mi_state_machines();
+
+	if (IS_ENABLED(CONFIG_NET_GPTP_PORT_CLOCK_SYNC)) {
+		gptp_port_clock_sync();
+	}
 }
 
 static void gptp_thread(void *p1, void *p2, void *p3)
