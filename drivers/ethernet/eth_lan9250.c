@@ -8,6 +8,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <zephyr/drivers/gpio.h>
@@ -17,6 +18,9 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/ethernet.h>
 #include <ethernet/eth_stats.h>
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+#include <zephyr/drivers/ptp_clock.h>
+#endif
 
 #include "eth_lan9250_priv.h"
 
@@ -314,6 +318,250 @@ static int lan9250_sw_reset(const struct device *dev)
 				  LAN9250_RESET_TIMEOUT);
 }
 
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+/* PTP event messages: Sync, Delay_Req, Pdelay_Req and Pdelay_Resp */
+#define LAN9250_PTP_EVENT_MSG_MASK  0x000FU
+#define LAN9250_PTP_VERSION         2U
+#define LAN9250_PTP_EVENT_PORT      319U
+#define LAN9250_PTP_HDR_LEN         34U
+#define LAN9250_PTP_HDR_SEQ_ID      30U
+#define LAN9250_PTP_MAX_VLAN_TAGS   2
+#define LAN9250_1588_TS_CAPTURES    4
+#define LAN9250_1588_NS_MASK        0x3FFFFFFFU
+
+static int lan9250_1588_init(const struct device *dev)
+{
+	const uint32_t ts_config = LAN9250_1588_TIMESTAMP_CONFIG_VERSION(LAN9250_PTP_VERSION) |
+				   LAN9250_1588_TIMESTAMP_CONFIG_MSG_EN(LAN9250_PTP_EVENT_MSG_MASK);
+	int ret;
+
+	/* The 1588 configuration must not change while the unit is enabled */
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_CMD_CTL, LAN9250_1588_CMD_CTL_DISABLE);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = lan9250_wait_ready(dev, LAN9250_1588_CMD_CTL, LAN9250_1588_CMD_CTL_ENABLE, 0,
+				 LAN9250_MAC_TIMEOUT);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Timestamp received and transmitted PTPv2 event messages. Layer 2,
+	 * UDP/IPv4 and UDP/IPv6 messages to the PTP multicast addresses are
+	 * detected by default.
+	 */
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_BANK_SEL, LAN9250_1588_BANK_SEL_RX);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_RX_TIMESTAMP_CONFIG, ts_config);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_BANK_SEL, LAN9250_1588_BANK_SEL_TX);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_TX_TIMESTAMP_CONFIG, ts_config);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return lan9250_write_sys_reg(dev, LAN9250_1588_CMD_CTL, LAN9250_1588_CMD_CTL_ENABLE);
+}
+
+/* Return the offset of the PTP header in a frame carrying a PTPv2 event
+ * message, or -ENOENT. Layer 2 messages and UDP messages over IPv4 or over
+ * IPv6 without extension headers are recognized, with up to two VLAN tags.
+ */
+static int lan9250_ptp_hdr_offset(const uint8_t *frame, size_t len)
+{
+	size_t off = offsetof(struct net_eth_hdr, type);
+	uint16_t type;
+	bool udp = false;
+
+	if (len < sizeof(struct net_eth_hdr)) {
+		return -ENOENT;
+	}
+
+	type = sys_get_be16(&frame[off]);
+	off += sizeof(uint16_t);
+
+	for (int i = 0; (i < LAN9250_PTP_MAX_VLAN_TAGS) && (type == NET_ETH_PTYPE_VLAN); i++) {
+		if (len < off + 2 * sizeof(uint16_t)) {
+			return -ENOENT;
+		}
+
+		type = sys_get_be16(&frame[off + sizeof(uint16_t)]);
+		off += 2 * sizeof(uint16_t);
+	}
+
+	switch (type) {
+	case NET_ETH_PTYPE_PTP:
+		break;
+	case NET_ETH_PTYPE_IP:
+		if ((len < off + NET_IPV4H_LEN) || (frame[off + 9] != NET_IPPROTO_UDP)) {
+			return -ENOENT;
+		}
+
+		off += (frame[off] & 0x0F) * sizeof(uint32_t);
+		udp = true;
+		break;
+	case NET_ETH_PTYPE_IPV6:
+		if ((len < off + NET_IPV6H_LEN) || (frame[off + 6] != NET_IPPROTO_UDP)) {
+			return -ENOENT;
+		}
+
+		off += NET_IPV6H_LEN;
+		udp = true;
+		break;
+	default:
+		return -ENOENT;
+	}
+
+	if (udp) {
+		/* Event messages use the event port */
+		if ((len < off + NET_UDPH_LEN) ||
+		    (sys_get_be16(&frame[off + sizeof(uint16_t)]) != LAN9250_PTP_EVENT_PORT)) {
+			return -ENOENT;
+		}
+
+		off += NET_UDPH_LEN;
+	}
+
+	if ((len < off + LAN9250_PTP_HDR_LEN) ||
+	    ((frame[off + 1] & 0x0F) != LAN9250_PTP_VERSION) ||
+	    ((BIT(frame[off] & 0x0F) & LAN9250_PTP_EVENT_MSG_MASK) == 0)) {
+		return -ENOENT;
+	}
+
+	return off;
+}
+
+/* Read the timestamp of a PTP event message from the RX or TX capture
+ * buffer. Captures that do not match the message type and sequence ID
+ * belong to frames that were dropped, or not timestamped by the network
+ * stack, and are discarded. Returns -ENOENT if no capture matches.
+ */
+static int lan9250_1588_get_ts(const struct device *dev, bool tx, const uint8_t *ptp_hdr,
+			       struct net_ptp_time *ts)
+{
+	const uint32_t sts_bit = tx ? LAN9250_1588_INT_STS_TX_TS : LAN9250_1588_INT_STS_RX_TS;
+	const uint16_t address = tx ? LAN9250_1588_TX_EGRESS_SEC : LAN9250_1588_RX_INGRESS_SEC;
+	const uint32_t expected =
+		FIELD_PREP(LAN9250_1588_MSG_HEADER_MSG_TYPE, ptp_hdr[0] & 0x0F) |
+		sys_get_be16(&ptp_hdr[LAN9250_PTP_HDR_SEQ_ID]);
+	/* Timestamp seconds, timestamp nanoseconds and message header */
+	uint8_t data[3 * sizeof(uint32_t)];
+	uint32_t header;
+	uint32_t sts;
+	int ret;
+
+	ret = lan9250_write_sys_reg(dev, LAN9250_1588_BANK_SEL,
+				    tx ? LAN9250_1588_BANK_SEL_TX : LAN9250_1588_BANK_SEL_RX);
+	if (ret < 0) {
+		return ret;
+	}
+
+	for (int i = 0; i < LAN9250_1588_TS_CAPTURES; i++) {
+		ret = lan9250_read_sys_reg(dev, LAN9250_1588_INT_STS, &sts);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if ((sts & sts_bit) == 0) {
+			return -ENOENT;
+		}
+
+		ret = lan9250_read(dev, LAN9250_SPI_ADDR_INC | address, data, sizeof(data));
+		if (ret < 0) {
+			return ret;
+		}
+
+		/* Release the capture, the next one is loaded if available */
+		ret = lan9250_write_sys_reg(dev, LAN9250_1588_INT_STS, sts_bit);
+		if (ret < 0) {
+			return ret;
+		}
+
+		header = sys_get_le32(&data[8]);
+		if ((header & LAN9250_1588_MSG_HEADER_ID) == expected) {
+			ts->second = sys_get_le32(&data[0]);
+			ts->nanosecond = sys_get_le32(&data[4]) & LAN9250_1588_NS_MASK;
+			return 0;
+		}
+
+		LOG_DBG("Discarding %s timestamp, header 0x%08x", tx ? "TX" : "RX", header);
+	}
+
+	return -ENOENT;
+}
+
+static void lan9250_1588_rx_ts(const struct device *dev, struct net_pkt *pkt, size_t len)
+{
+	struct lan9250_runtime *ctx = dev->data;
+	struct net_ptp_time ts;
+	int off;
+	int ret;
+
+	off = lan9250_ptp_hdr_offset(ctx->buf, len);
+	if (off < 0) {
+		return;
+	}
+
+	ret = lan9250_1588_get_ts(dev, false, &ctx->buf[off], &ts);
+	if (ret < 0) {
+		LOG_DBG("No RX timestamp: %d", ret);
+		return;
+	}
+
+	net_pkt_set_timestamp(pkt, &ts);
+	net_pkt_set_rx_timestamping(pkt, true);
+}
+
+/* Wait for the egress timestamp of a frame still in ctx->buf */
+static void lan9250_1588_tx_ts(const struct device *dev, struct net_pkt *pkt, size_t len)
+{
+	struct lan9250_runtime *ctx = dev->data;
+	struct net_ptp_time ts;
+	k_timepoint_t end;
+	int off;
+	int ret;
+
+	off = lan9250_ptp_hdr_offset(ctx->buf, len);
+	if (off < 0) {
+		LOG_DBG("TX frame not timestamped by the device");
+		return;
+	}
+
+	end = sys_timepoint_calc(K_MSEC(LAN9250_1588_TX_TS_TIMEOUT));
+	while (true) {
+		ret = lan9250_1588_get_ts(dev, true, &ctx->buf[off], &ts);
+		if (ret == 0) {
+			net_pkt_set_timestamp(pkt, &ts);
+			net_if_add_tx_timestamp(pkt);
+			return;
+		}
+
+		if (ret != -ENOENT) {
+			LOG_ERR("Reading TX timestamp failed: %d", ret);
+			return;
+		}
+
+		if (sys_timepoint_expired(end)) {
+			LOG_WRN("No TX timestamp");
+			return;
+		}
+
+		k_usleep(LAN9250_1588_TX_TS_POLL_US);
+	}
+}
+#endif /* CONFIG_PTP_CLOCK_LAN9250 */
+
 static int lan9250_configure(const struct device *dev)
 {
 	uint32_t tmp;
@@ -406,8 +654,8 @@ static int lan9250_configure(const struct device *dev)
 	/* Configure remote power management:
 	 *
 	 *   - Auto wakeup
-	 *   - Disable 1588 clock
-	 *   - Disable 1588 timestamp unit clock
+	 *   - Disable 1588 clock, unless the PTP clock is used
+	 *   - Disable 1588 timestamp unit clock, unless the PTP clock is used
 	 *   - Energy-detect
 	 *   - Wake on
 	 *   - Clear wakeon
@@ -416,11 +664,14 @@ static int lan9250_configure(const struct device *dev)
 	 * consecutive times.
 	 */
 	for (int i = 0; i < 2; i++) {
-		ret = lan9250_write_sys_reg(dev, LAN9250_PMT_CTRL,
-					    LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_1588_DIS |
-						    LAN9250_PMT_CTRL_1588_TSU_DIS |
-						    LAN9250_PMT_CTRL_WOL_EN |
-						    LAN9250_PMT_CTRL_WOL_STS);
+		ret = lan9250_write_sys_reg(
+			dev, LAN9250_PMT_CTRL,
+			LAN9250_PMT_CTRL_PM_WAKE | LAN9250_PMT_CTRL_WOL_EN |
+				LAN9250_PMT_CTRL_WOL_STS |
+				(IS_ENABLED(CONFIG_PTP_CLOCK_LAN9250)
+					 ? 0
+					 : (LAN9250_PMT_CTRL_1588_DIS |
+					    LAN9250_PMT_CTRL_1588_TSU_DIS)));
 		if (ret < 0) {
 			return ret;
 		}
@@ -559,6 +810,13 @@ static int lan9250_configure(const struct device *dev)
 	}
 #endif
 
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+	ret = lan9250_1588_init(dev);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
 	/* Configure TX:
 	 *
 	 *   - TX enable
@@ -672,6 +930,10 @@ static int lan9250_rx_frame(const struct device *dev)
 		return 0;
 	}
 
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+	lan9250_1588_rx_ts(dev, pkt, pkt_len);
+#endif
+
 	/* Feed buffer frame to IP stack */
 	if (net_recv_data(ctx->iface, pkt) < 0) {
 		net_pkt_unref(pkt);
@@ -777,6 +1039,12 @@ static int lan9250_tx_frame(const struct device *dev, struct net_pkt *pkt)
 			return ret;
 		}
 	}
+
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+	if (net_pkt_is_tx_timestamping(pkt)) {
+		lan9250_1588_tx_ts(dev, pkt, len);
+	}
+#endif
 
 	return 0;
 }
@@ -1053,11 +1321,177 @@ static int lan9250_set_config(const struct device *dev,
 	return -ENOTSUP;
 }
 
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+static const struct device *lan9250_get_ptp_clock(const struct device *dev,
+						  struct net_if *iface __unused)
+{
+	const struct lan9250_config *config = dev->config;
+
+	return config->ptp_clock;
+}
+
+static int lan9250_ptp_clock_set(const struct device *dev, struct net_ptp_time *tm)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan9250_runtime *ctx = eth_dev->data;
+	int ret;
+
+	/* The 1588 clock has 32 bits of seconds */
+	if ((tm->second > UINT32_MAX) || (tm->nanosecond >= NSEC_PER_SEC)) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ctx->lock, K_FOREVER);
+
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_SEC, (uint32_t)tm->second);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_NS, tm->nanosecond);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_SUBNS, 0);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CMD_CTL,
+				    LAN9250_1588_CMD_CTL_CLOCK_LOAD);
+
+out:
+	k_mutex_unlock(&ctx->lock);
+
+	return ret;
+}
+
+static int lan9250_ptp_clock_get(const struct device *dev, struct net_ptp_time *tm)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan9250_runtime *ctx = eth_dev->data;
+	/* Clock seconds and clock nanoseconds */
+	uint8_t data[2 * sizeof(uint32_t)];
+	int ret;
+
+	k_mutex_lock(&ctx->lock, K_FOREVER);
+
+	/* Save the current clock value into the clock registers */
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CMD_CTL,
+				    LAN9250_1588_CMD_CTL_CLOCK_READ);
+	if (ret == 0) {
+		ret = lan9250_read(eth_dev, LAN9250_SPI_ADDR_INC | LAN9250_1588_CLOCK_SEC, data,
+				   sizeof(data));
+	}
+
+	k_mutex_unlock(&ctx->lock);
+
+	if (ret < 0) {
+		return ret;
+	}
+
+	tm->second = sys_get_le32(&data[0]);
+	tm->nanosecond = sys_get_le32(&data[4]) & LAN9250_1588_NS_MASK;
+
+	return 0;
+}
+
+static int lan9250_ptp_clock_adjust(const struct device *dev, int increment)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan9250_runtime *ctx = eth_dev->data;
+	int32_t sec = increment / (int32_t)NSEC_PER_SEC;
+	int32_t nsec = increment % (int32_t)NSEC_PER_SEC;
+	int ret = 0;
+
+	/* Only positive nanosecond steps are supported, so step the seconds
+	 * down and the nanoseconds up for negative adjustments.
+	 */
+	if (nsec < 0) {
+		nsec += NSEC_PER_SEC;
+		sec--;
+	}
+
+	k_mutex_lock(&ctx->lock, K_FOREVER);
+
+	if (sec != 0) {
+		ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_STEP_ADJ,
+					    (sec > 0 ? LAN9250_1588_CLOCK_STEP_ADJ_ADD : 0) |
+						    (uint32_t)abs(sec));
+		if (ret < 0) {
+			goto out;
+		}
+
+		ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CMD_CTL,
+					    LAN9250_1588_CMD_CTL_CLOCK_STEP_SEC);
+		if (ret < 0) {
+			goto out;
+		}
+	}
+
+	if (nsec != 0) {
+		/* The step replaces the regular increment of one clock period */
+		ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_STEP_ADJ,
+					    LAN9250_1588_CLOCK_STEP_ADJ_ADD |
+						    (nsec + LAN9250_1588_CLOCK_PERIOD_NS));
+		if (ret < 0) {
+			goto out;
+		}
+
+		ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CMD_CTL,
+					    LAN9250_1588_CMD_CTL_CLOCK_STEP_NS);
+	}
+
+out:
+	k_mutex_unlock(&ctx->lock);
+
+	return ret;
+}
+
+static int lan9250_ptp_clock_rate_adjust(const struct device *dev, double ratio)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan9250_runtime *ctx = eth_dev->data;
+	/* Rate adjustment in 2^-32 ns per clock period */
+	double adj = (ratio - 1.0) * LAN9250_1588_CLOCK_PERIOD_NS * (double)BIT64(32);
+	uint32_t val;
+	int ret;
+
+	if ((adj > LAN9250_1588_CLOCK_RATE_ADJ_VALUE) ||
+	    (adj < -(double)LAN9250_1588_CLOCK_RATE_ADJ_VALUE)) {
+		return -EINVAL;
+	}
+
+	if (adj >= 0) {
+		val = LAN9250_1588_CLOCK_RATE_ADJ_FASTER | (uint32_t)(adj + 0.5);
+	} else {
+		val = (uint32_t)(-adj + 0.5);
+	}
+
+	k_mutex_lock(&ctx->lock, K_FOREVER);
+	ret = lan9250_write_sys_reg(eth_dev, LAN9250_1588_CLOCK_RATE_ADJ, val);
+	k_mutex_unlock(&ctx->lock);
+
+	return ret;
+}
+
+static DEVICE_API(ptp_clock, lan9250_ptp_api) = {
+	.set = lan9250_ptp_clock_set,
+	.get = lan9250_ptp_clock_get,
+	.adjust = lan9250_ptp_clock_adjust,
+	.rate_adjust = lan9250_ptp_clock_rate_adjust,
+};
+#endif /* CONFIG_PTP_CLOCK_LAN9250 */
+
 static const struct ethernet_api api_funcs = {
 	.iface_api.init = lan9250_iface_init,
 	.get_capabilities = lan9250_get_capabilities,
 	.set_config = lan9250_set_config,
 	.send = lan9250_tx,
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+	.get_ptp_clock = lan9250_get_ptp_clock,
+#endif
 };
 
 static int lan9250_init(const struct device *dev)
@@ -1152,14 +1586,23 @@ static int lan9250_init(const struct device *dev)
 		.int_sem = Z_SEM_INITIALIZER(lan9250_##inst##_runtime.int_sem, 0, UINT_MAX),       \
 	};                                                                                         \
                                                                                                    \
+	IF_ENABLED(CONFIG_PTP_CLOCK_LAN9250, (DEVICE_DECLARE(lan9250_ptp_clock_##inst);))          \
+                                                                                                   \
 	static const struct lan9250_config lan9250_##inst##_config = {                             \
 		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),                                \
 		.interrupt = GPIO_DT_SPEC_INST_GET(inst, int_gpios),                               \
 		.reset = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {0}),                         \
 		.mac_cfg = NET_ETH_MAC_DT_INST_CONFIG_INIT(inst),                                  \
+		IF_ENABLED(CONFIG_PTP_CLOCK_LAN9250,                                               \
+			   (.ptp_clock = DEVICE_GET(lan9250_ptp_clock_##inst),))                   \
 	};                                                                                         \
                                                                                                    \
 	ETH_NET_DEVICE_DT_INST_DEFINE(inst, lan9250_init, NULL, &lan9250_##inst##_runtime,         \
 				      &lan9250_##inst##_config, CONFIG_ETH_INIT_PRIORITY,          \
-				      &api_funcs, NET_ETH_MTU);
+				      &api_funcs, NET_ETH_MTU);                                    \
+                                                                                                   \
+	IF_ENABLED(CONFIG_PTP_CLOCK_LAN9250,                                                       \
+		   (DEVICE_DEFINE(lan9250_ptp_clock_##inst, PTP_CLOCK_NAME, NULL, NULL, NULL,      \
+				  DEVICE_DT_INST_GET(inst), POST_KERNEL,                           \
+				  CONFIG_ETH_INIT_PRIORITY, &lan9250_ptp_api);))
 DT_INST_FOREACH_STATUS_OKAY(LAN9250_DEFINE);

@@ -47,4 +47,15 @@ config ETH_LAN9250_BUF_ALLOC_TIMEOUT
 	  that the driver will wait from the IP stack to get
 	  a memory buffer before the Ethernet frame is dropped.
 
+config PTP_CLOCK_LAN9250
+	bool "LAN9250 PTP clock driver support"
+	default y
+	depends on PTP_CLOCK
+	select NET_L2_PTP_TIMESTAMPING
+	help
+	  Enable the LAN9250 IEEE 1588 clock and timestamping of PTP event
+	  messages (Sync, Delay_Req, Pdelay_Req and Pdelay_Resp) sent as
+	  Layer 2, UDP/IPv4 or UDP/IPv6 frames. The timestamp latencies are
+	  the 100BASE-TX defaults of the device.
+
 endif

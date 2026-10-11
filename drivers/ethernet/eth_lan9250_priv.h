@@ -27,6 +27,9 @@
 #define LAN9250_SPI_INSTR_READ      0x03
 #define LAN9250_SPI_INSTR_FAST_READ 0x0B
 
+/* SPI address flag: auto-increment the address for multi-DWORD accesses */
+#define LAN9250_SPI_ADDR_INC 0x4000
+
 /* TX command 'A' format */
 #define LAN9250_TX_CMD_A_INT_ON_COMP     0x80000000
 #define LAN9250_TX_CMD_A_BUFFER_ALIGN_4B 0x00000000
@@ -63,6 +66,24 @@
 #define LAN9250_MAC_CSR_DATA   0x00A8
 #define LAN9250_AFC_CFG        0x00AC
 #define LAN9250_RESET_CTL      0x01F8
+
+/* LAN9250 1588 registers */
+#define LAN9250_1588_CMD_CTL        0x0100
+#define LAN9250_1588_INT_STS        0x0108
+#define LAN9250_1588_CLOCK_SEC      0x0110
+#define LAN9250_1588_CLOCK_NS       0x0114
+#define LAN9250_1588_CLOCK_SUBNS    0x0118
+#define LAN9250_1588_CLOCK_RATE_ADJ 0x011C
+#define LAN9250_1588_CLOCK_STEP_ADJ 0x0128
+#define LAN9250_1588_BANK_SEL       0x0154
+
+/* LAN9250 1588 port RX registers (bank 1) */
+#define LAN9250_1588_RX_TIMESTAMP_CONFIG 0x015C
+#define LAN9250_1588_RX_INGRESS_SEC      0x016C
+
+/* LAN9250 1588 port TX registers (bank 2) */
+#define LAN9250_1588_TX_TIMESTAMP_CONFIG 0x015C
+#define LAN9250_1588_TX_EGRESS_SEC       0x016C
 
 /* LAN9250 Host MAC registers */
 #define LAN9250_HMAC_CR       0x01
@@ -216,6 +237,47 @@
 #define LAN9250_PMT_CTRL_PME_EN            0x00000002
 #define LAN9250_PMT_CTRL_READY             0x00000001
 
+/* 1588 Command and Control Register (1588_CMD_CTL) */
+#define LAN9250_1588_CMD_CTL_CLOCK_STEP_NS  0x00000040
+#define LAN9250_1588_CMD_CTL_CLOCK_STEP_SEC 0x00000020
+#define LAN9250_1588_CMD_CTL_CLOCK_LOAD     0x00000010
+#define LAN9250_1588_CMD_CTL_CLOCK_READ     0x00000008
+#define LAN9250_1588_CMD_CTL_ENABLE         0x00000004
+#define LAN9250_1588_CMD_CTL_DISABLE        0x00000002
+
+/* 1588 Interrupt Status Register (1588_INT_STS) */
+#define LAN9250_1588_INT_STS_TX_TS 0x00001000
+#define LAN9250_1588_INT_STS_RX_TS 0x00000100
+
+/* 1588 Clock Rate Adjustment Register (1588_CLOCK_RATE_ADJ) */
+#define LAN9250_1588_CLOCK_RATE_ADJ_FASTER 0x80000000
+#define LAN9250_1588_CLOCK_RATE_ADJ_VALUE  0x3FFFFFFF
+
+/* 1588 Clock Step Adjustment Register (1588_CLOCK_STEP_ADJ) */
+#define LAN9250_1588_CLOCK_STEP_ADJ_ADD   0x80000000
+#define LAN9250_1588_CLOCK_STEP_ADJ_VALUE 0x3FFFFFFF
+
+/* 1588 Bank Port GPIO Select Register (1588_BANK_PORT_GPIO_SEL) */
+#define LAN9250_1588_BANK_SEL_RX 0x00000001
+#define LAN9250_1588_BANK_SEL_TX 0x00000002
+
+/* 1588 Port RX/TX Timestamp Configuration Registers */
+#define LAN9250_1588_TIMESTAMP_CONFIG_VERSION(x) (((x) << 16) & 0x000F0000)
+#define LAN9250_1588_TIMESTAMP_CONFIG_MSG_EN(x)  ((x) & 0x0000FFFF)
+
+/* 1588 Port RX/TX Message Header Registers */
+#define LAN9250_1588_MSG_HEADER_MSG_TYPE 0x000F0000
+#define LAN9250_1588_MSG_HEADER_SEQ_ID   0x0000FFFF
+#define LAN9250_1588_MSG_HEADER_ID       (LAN9250_1588_MSG_HEADER_MSG_TYPE | \
+					  LAN9250_1588_MSG_HEADER_SEQ_ID)
+
+/* 1588 Clock reference period in nanoseconds */
+#define LAN9250_1588_CLOCK_PERIOD_NS 10U
+
+/* 1588 TX timestamp wait timeout in milliseconds and poll interval in microseconds */
+#define LAN9250_1588_TX_TS_TIMEOUT 20
+#define LAN9250_1588_TX_TS_POLL_US 50
+
 /* HOST MAC CSR INTERFACE COMMAND REGISTER (MAC_CSR_CMD) */
 #define LAN9250_MAC_CSR_CMD_BUSY  0x80000000
 #define LAN9250_MAC_CSR_CMD_WRITE 0x00000000
@@ -338,6 +400,9 @@ struct lan9250_config {
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
 	struct net_eth_mac_config mac_cfg;
+#if defined(CONFIG_PTP_CLOCK_LAN9250)
+	const struct device *ptp_clock;
+#endif
 };
 
 struct lan9250_runtime {
