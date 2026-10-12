@@ -38,9 +38,26 @@
 #define LAN865x_MAC_SAT1         MMS_REG(0x1, 0x023)
 #define LAN865x_MAC_SAB2         MMS_REG(0x1, 0x024)
 #define LAN865x_MAC_SAT2         MMS_REG(0x1, 0x025)
-/* LAN8650/1 configuration fixup from AN1760 */
-#define LAN865X_FIXUP_REG        MMS_REG(0x1, 0x077)
-#define LAN865X_FIXUP_VALUE      0x0028
+#define LAN865x_MAC_TISUBN       MMS_REG(0x1, 0x06F)
+#define LAN865x_MAC_TISUBN_LSB   GENMASK(31, 24)
+#define LAN865x_MAC_TISUBN_MSB   GENMASK(15, 0)
+#define LAN865x_MAC_TSH          MMS_REG(0x1, 0x070)
+#define LAN865x_MAC_TSL          MMS_REG(0x1, 0x074)
+#define LAN865x_MAC_TN           MMS_REG(0x1, 0x075)
+#define LAN865x_MAC_TN_TNS       GENMASK(29, 0)
+#define LAN865x_MAC_TA           MMS_REG(0x1, 0x076)
+#define LAN865x_MAC_TA_ADJ       BIT(31)
+#define LAN865x_MAC_TA_ITDT      GENMASK(29, 0)
+/* TSU timer increment, 40 ns per period of the 25 MHz clock (AN1760) */
+#define LAN865x_MAC_TI           MMS_REG(0x1, 0x077)
+#define LAN865x_MAC_TI_CNS       GENMASK(7, 0)
+#define LAN865x_TSU_PERIOD_NS    40U
+/* Sub-nanoseconds of the TSU timer increment, in 2^-24 ns */
+#define LAN865x_TSU_SUBNS_BITS   24U
+
+/* Egress timestamp capture polling */
+#define LAN865X_TX_TS_TIMEOUT_MS 20
+#define LAN865X_TX_TS_POLL_US    50
 
 #define LAN865x_MAC_TXRX_ON  1
 #define LAN865x_MAC_TXRX_OFF 0
@@ -54,6 +71,7 @@ struct lan865x_config {
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
 	struct net_eth_mac_config mac_cfg;
+	const struct device *ptp_clock;
 
 	/* MAC */
 	bool tx_cut_through_mode; /* 1 - tx cut through, 0 - Store and forward */
@@ -65,6 +83,8 @@ struct lan865x_data {
 	struct gpio_callback gpio_int_callback;
 	struct k_sem tx_rx_sem;
 	struct k_sem int_sem;
+	/* Serializes the multi-register accesses of the TSU timer */
+	struct k_mutex ptp_lock;
 	struct oa_tc6 *tc6;
 	uint16_t chip_id;
 	uint8_t silicon_rev;

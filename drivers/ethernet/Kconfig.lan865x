@@ -48,4 +48,16 @@ config ETH_LAN865X_TIMEOUT
 	  that the driver will wait from the IP stack to get
 	  a memory buffer.
 
+config PTP_CLOCK_LAN865X
+	bool "LAN865X PTP clock driver support"
+	default y
+	depends on PTP_CLOCK
+	select NET_L2_PTP_TIMESTAMPING
+	help
+	  Enable the LAN865X TSU timer as PTP clock and the timestamping of
+	  frames. Ingress timestamps are added by the device to all received
+	  frames, egress timestamps are captured for the frames that request
+	  one. Both are taken at the end of the SFD on the MDI, so they are
+	  not affected by the PLCA transmit opportunity delay.
+
 endif # ETH_LAN865X

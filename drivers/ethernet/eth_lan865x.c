@@ -15,8 +15,13 @@ LOG_MODULE_REGISTER(eth_lan865x, CONFIG_ETHERNET_LOG_LEVEL);
 
 #include <string.h>
 #include <errno.h>
+#include <stdlib.h>
 
 #include <zephyr/net/net_if.h>
+
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+#include <zephyr/drivers/ptp_clock.h>
+#endif
 
 #include "eth_lan865x_priv.h"
 
@@ -75,6 +80,10 @@ static int lan865x_enable_sync(const struct device *dev)
 		return ret;
 	}
 	val |= OA_CONFIG0_SYNC | OA_CONFIG0_RFA_ZARFE;
+	if (IS_ENABLED(CONFIG_PTP_CLOCK_LAN865X)) {
+		/* 64-bit ingress and egress frame timestamps */
+		val |= OA_CONFIG0_FTSE | OA_CONFIG0_FTSS;
+	}
 	ret = oa_tc6_reg_write(ctx->tc6, OA_CONFIG0, val);
 	if (ret) {
 		return ret;
@@ -266,7 +275,7 @@ static int lan865x_default_config(const struct device *dev)
 	/* Enable protected control RW */
 	oa_tc6_set_protected_ctrl(ctx->tc6, true);
 
-	ret = oa_tc6_reg_write(ctx->tc6, LAN865X_FIXUP_REG, LAN865X_FIXUP_VALUE);
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TI, LAN865x_TSU_PERIOD_NS);
 	if (ret) {
 		return ret;
 	}
@@ -447,14 +456,93 @@ static int lan865x_init(const struct device *dev)
 	return lan865x_gpio_reset(dev);
 }
 
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+/* Wait for the egress timestamp of a frame sent with capture register A */
+static void lan865x_tx_timestamp(const struct device *dev, struct net_pkt *pkt)
+{
+	struct lan865x_data *ctx = dev->data;
+	struct oa_tc6 *tc6 = ctx->tc6;
+	struct net_ptp_time ts;
+	k_timepoint_t end;
+	uint32_t sec;
+	uint32_t nsec;
+	uint32_t sts;
+	int ret;
+
+	/* The frame waits for a PLCA transmit opportunity */
+	end = sys_timepoint_calc(K_MSEC(LAN865X_TX_TS_TIMEOUT_MS));
+	while (true) {
+		ret = oa_tc6_reg_read(tc6, OA_STATUS0, &sts);
+		if (ret < 0) {
+			goto err;
+		}
+
+		if ((sts & OA_STATUS0_TTSCAA) != 0U) {
+			break;
+		}
+
+		if (sys_timepoint_expired(end)) {
+			LOG_WRN("No TX timestamp");
+			return;
+		}
+
+		k_usleep(LAN865X_TX_TS_POLL_US);
+	}
+
+	ret = oa_tc6_reg_read(tc6, OA_TTSCAH, &sec);
+	if (ret < 0) {
+		goto err;
+	}
+
+	ret = oa_tc6_reg_read(tc6, OA_TTSCAL, &nsec);
+	if (ret < 0) {
+		goto err;
+	}
+
+	ret = oa_tc6_reg_write(tc6, OA_STATUS0, OA_STATUS0_TTSCAA);
+	if (ret < 0) {
+		goto err;
+	}
+
+	ts.second = sec;
+	ts.nanosecond = nsec & OA_TC6_TS_NS_MASK;
+
+	net_pkt_set_timestamp(pkt, &ts);
+	net_if_add_tx_timestamp(pkt);
+
+	return;
+
+err:
+	LOG_ERR("Reading TX timestamp failed: %d", ret);
+}
+#endif /* CONFIG_PTP_CLOCK_LAN865X */
+
 static int lan865x_port_send(const struct device *dev, struct net_pkt *pkt)
 {
 	struct lan865x_data *ctx = dev->data;
 	struct oa_tc6 *tc6 = ctx->tc6;
+	uint8_t tsc = OA_DATA_HDR_TSC_NONE;
 	int ret;
 
 	k_sem_take(&ctx->tx_rx_sem, K_FOREVER);
-	ret = oa_tc6_send_chunks(tc6, pkt, OA_DATA_HDR_TSC_NONE);
+
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+	if (net_pkt_is_tx_timestamping(pkt)) {
+		/* Discard a capture left by a frame whose timestamp timed out */
+		ret = oa_tc6_reg_write(tc6, OA_STATUS0, OA_STATUS0_TTSCAA);
+		if (ret == 0) {
+			tsc = OA_DATA_HDR_TSC_A;
+		}
+	}
+#endif
+
+	ret = oa_tc6_send_chunks(tc6, pkt, tsc);
+
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+	if ((ret == 0) && (tsc != OA_DATA_HDR_TSC_NONE)) {
+		lan865x_tx_timestamp(dev, pkt);
+	}
+#endif
 
 	/* Check if rca > 0 during half-duplex TX transmission */
 	if (tc6->rca > 0) {
@@ -477,21 +565,194 @@ const struct device *lan865x_get_phy(const struct device *dev, struct net_if *if
 	return cfg->phy;
 }
 
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+static const struct device *lan865x_get_ptp_clock(const struct device *dev,
+						  struct net_if *iface __unused)
+{
+	const struct lan865x_config *cfg = dev->config;
+
+	return cfg->ptp_clock;
+}
+
+static int lan865x_ptp_clock_set(const struct device *dev, struct net_ptp_time *tm)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan865x_data *ctx = eth_dev->data;
+	int ret;
+
+	/* The frame timestamps have 32 bits of seconds */
+	if ((tm->second > UINT32_MAX) || (tm->nanosecond >= NSEC_PER_SEC)) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ctx->ptp_lock, K_FOREVER);
+
+	/* Clear the nanoseconds first, so that the seconds do not roll over
+	 * while the timer is written.
+	 */
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TN, 0);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TSH, 0);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TSL, (uint32_t)tm->second);
+	if (ret < 0) {
+		goto out;
+	}
+
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TN, tm->nanosecond);
+
+out:
+	k_mutex_unlock(&ctx->ptp_lock);
+
+	return ret;
+}
+
+static int lan865x_ptp_clock_get(const struct device *dev, struct net_ptp_time *tm)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan865x_data *ctx = eth_dev->data;
+	uint32_t sec_before;
+	uint32_t sec_after;
+	uint32_t nsec;
+	int ret;
+
+	k_mutex_lock(&ctx->ptp_lock, K_FOREVER);
+
+	/* The timer is not latched, so the seconds are read before and after
+	 * the nanoseconds to detect a roll over.
+	 */
+	ret = oa_tc6_reg_read(ctx->tc6, LAN865x_MAC_TSL, &sec_before);
+	if (ret == 0) {
+		ret = oa_tc6_reg_read(ctx->tc6, LAN865x_MAC_TN, &nsec);
+	}
+
+	if (ret == 0) {
+		ret = oa_tc6_reg_read(ctx->tc6, LAN865x_MAC_TSL, &sec_after);
+	}
+
+	k_mutex_unlock(&ctx->ptp_lock);
+
+	if (ret < 0) {
+		return ret;
+	}
+
+	nsec &= LAN865x_MAC_TN_TNS;
+
+	/* A roll over before the nanoseconds were read leaves them small */
+	if ((sec_before != sec_after) && (nsec < NSEC_PER_SEC / 2U)) {
+		tm->second = sec_after;
+	} else {
+		tm->second = sec_before;
+	}
+
+	tm->nanosecond = nsec;
+
+	return 0;
+}
+
+static int lan865x_ptp_clock_adjust(const struct device *dev, int increment)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan865x_data *ctx = eth_dev->data;
+	int64_t remaining = increment;
+	int32_t step;
+	int ret = 0;
+
+	k_mutex_lock(&ctx->ptp_lock, K_FOREVER);
+
+	/* The timer is adjusted by less than one second per write, the
+	 * seconds are carried by the device.
+	 */
+	while (remaining != 0) {
+		step = (int32_t)CLAMP(remaining, -((int64_t)NSEC_PER_SEC - 1),
+				      (int64_t)NSEC_PER_SEC - 1);
+
+		ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TA,
+				       (step < 0 ? LAN865x_MAC_TA_ADJ : 0U) |
+					       FIELD_PREP(LAN865x_MAC_TA_ITDT, abs(step)));
+		if (ret < 0) {
+			break;
+		}
+
+		remaining -= step;
+	}
+
+	k_mutex_unlock(&ctx->ptp_lock);
+
+	return ret;
+}
+
+static int lan865x_ptp_clock_rate_adjust(const struct device *dev, double ratio)
+{
+	const struct device *eth_dev = dev->config;
+	struct lan865x_data *ctx = eth_dev->data;
+	/* Timer increment per clock period in 2^-24 ns */
+	double incr = ratio * LAN865x_TSU_PERIOD_NS * (double)BIT64(LAN865x_TSU_SUBNS_BITS);
+	uint64_t val;
+	uint32_t subns;
+	int ret;
+
+	if ((incr < (double)BIT64(LAN865x_TSU_SUBNS_BITS)) ||
+	    (incr >= (double)((uint64_t)(LAN865x_MAC_TI_CNS + 1U) << LAN865x_TSU_SUBNS_BITS))) {
+		return -EINVAL;
+	}
+
+	val = (uint64_t)(incr + 0.5);
+	subns = (uint32_t)(val & GENMASK64(LAN865x_TSU_SUBNS_BITS - 1U, 0));
+
+	k_mutex_lock(&ctx->ptp_lock, K_FOREVER);
+
+	/* The sub-nanoseconds take effect when the increment is written */
+	ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TISUBN,
+			       FIELD_PREP(LAN865x_MAC_TISUBN_LSB, subns & 0xFFU) |
+				       FIELD_PREP(LAN865x_MAC_TISUBN_MSB, subns >> 8));
+	if (ret == 0) {
+		ret = oa_tc6_reg_write(ctx->tc6, LAN865x_MAC_TI,
+				       FIELD_PREP(LAN865x_MAC_TI_CNS,
+						  val >> LAN865x_TSU_SUBNS_BITS));
+	}
+
+	k_mutex_unlock(&ctx->ptp_lock);
+
+	return ret;
+}
+
+static DEVICE_API(ptp_clock, lan865x_ptp_api) = {
+	.set = lan865x_ptp_clock_set,
+	.get = lan865x_ptp_clock_get,
+	.adjust = lan865x_ptp_clock_adjust,
+	.rate_adjust = lan865x_ptp_clock_rate_adjust,
+};
+#endif /* CONFIG_PTP_CLOCK_LAN865X */
+
 static const struct ethernet_api lan865x_api_func = {
 	.iface_api.init = lan865x_iface_init,
 	.get_capabilities = lan865x_port_get_capabilities,
 	.set_config = lan865x_set_config,
 	.send = lan865x_port_send,
 	.get_phy = lan865x_get_phy,
+#if defined(CONFIG_PTP_CLOCK_LAN865X)
+	.get_ptp_clock = lan865x_get_ptp_clock,
+#endif
 };
 
 #define LAN865X_DEFINE(inst)                                                                       \
+	IF_ENABLED(CONFIG_PTP_CLOCK_LAN865X, (DEVICE_DECLARE(lan865x_ptp_clock_##inst);))          \
+                                                                                                   \
 	static const struct lan865x_config lan865x_config_##inst = {                               \
 		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),                                \
 		.interrupt = GPIO_DT_SPEC_INST_GET(inst, int_gpios),                               \
 		.reset = GPIO_DT_SPEC_INST_GET(inst, rst_gpios),                                   \
 		.phy = DEVICE_DT_GET(DT_INST_PHANDLE(inst, phy_handle)),                           \
 		.mac_cfg = NET_ETH_MAC_DT_INST_CONFIG_INIT(inst),                                  \
+		IF_ENABLED(CONFIG_PTP_CLOCK_LAN865X,                                               \
+			   (.ptp_clock = DEVICE_GET(lan865x_ptp_clock_##inst),))                   \
 	};                                                                                         \
                                                                                                    \
 	struct oa_tc6 oa_tc6_##inst = {                                                            \
@@ -499,10 +760,16 @@ static const struct ethernet_api lan865x_api_func = {
 	static struct lan865x_data lan865x_data_##inst = {                                         \
 		.tx_rx_sem = Z_SEM_INITIALIZER((lan865x_data_##inst).tx_rx_sem, 1, 1),             \
 		.int_sem = Z_SEM_INITIALIZER((lan865x_data_##inst).int_sem, 0, 1),                 \
+		.ptp_lock = Z_MUTEX_INITIALIZER((lan865x_data_##inst).ptp_lock),                   \
 		.tc6 = &oa_tc6_##inst};                                                            \
                                                                                                    \
 	ETH_NET_DEVICE_DT_INST_DEFINE(inst, lan865x_init, NULL, &lan865x_data_##inst,              \
 				      &lan865x_config_##inst, CONFIG_ETH_LAN865X_INIT_PRIORITY,    \
-				      &lan865x_api_func, NET_ETH_MTU);
+				      &lan865x_api_func, NET_ETH_MTU);                             \
+                                                                                                   \
+	IF_ENABLED(CONFIG_PTP_CLOCK_LAN865X,                                                       \
+		   (DEVICE_DEFINE(lan865x_ptp_clock_##inst, PTP_CLOCK_NAME, NULL, NULL, NULL,      \
+				  DEVICE_DT_INST_GET(inst), POST_KERNEL,                           \
+				  CONFIG_ETH_LAN865X_INIT_PRIORITY, &lan865x_ptp_api);))
 
 DT_INST_FOREACH_STATUS_OKAY(LAN865X_DEFINE);
