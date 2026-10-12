@@ -502,13 +502,14 @@ static struct net_pkt *bridge_resolve_local_dst(struct net_if *bridge, struct ne
 {
 #if defined(CONFIG_NET_IPV4) && defined(CONFIG_NET_ARP)
 	struct net_pkt *arp_pkt = NULL;
+	struct net_eth_addr mcast_addr;
+	const uint8_t *dst;
 	int ret;
 
 	/* Only locally originated IPv4 packets need resolving here. Forwarded
 	 * (L2 bridged) frames already carry a complete Ethernet header, ARP
 	 * frames drive their own destination, and packets whose destination is
-	 * already known (broadcast/multicast or a cached neighbor) have a
-	 * non-zero link address.
+	 * already known (a cached neighbor) have a non-zero link address.
 	 */
 	if (net_pkt_is_l2_bridged(pkt) ||
 	    net_pkt_ll_proto_type(pkt) != NET_ETH_PTYPE_IP ||
@@ -516,8 +517,25 @@ static struct net_pkt *bridge_resolve_local_dst(struct net_if *bridge, struct ne
 		return pkt;
 	}
 
-	ret = net_arp_prepare(pkt, (struct net_in_addr *)NET_IPV4_HDR(pkt)->dst,
-			      NULL, &arp_pkt);
+	/* Broadcast and multicast destinations are mapped, not resolved. The
+	 * Ethernet layer cannot map them as the packets are forwarded to the
+	 * member ports with the family reset to AF_UNSPEC.
+	 */
+	dst = NET_IPV4_HDR(pkt)->dst;
+	if (net_ipv4_is_addr_mcast_raw(dst)) {
+		net_eth_ipv4_mcast_to_mac_addr((const struct net_in_addr *)dst, &mcast_addr);
+		(void)net_linkaddr_set(net_pkt_lladdr_dst(pkt), mcast_addr.addr,
+				       sizeof(mcast_addr));
+		return pkt;
+	}
+
+	if (net_ipv4_is_addr_bcast_raw(bridge, dst)) {
+		(void)net_linkaddr_set(net_pkt_lladdr_dst(pkt), net_eth_broadcast_addr()->addr,
+				       sizeof(struct net_eth_addr));
+		return pkt;
+	}
+
+	ret = net_arp_prepare(pkt, (struct net_in_addr *)dst, NULL, &arp_pkt);
 	switch (ret) {
 	case NET_ARP_COMPLETE:
 		/* Destination link address is now filled in pkt. */
