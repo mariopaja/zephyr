@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <string.h>
 #include <zephyr/net/mdio.h>
 #include "oa_tc6.h"
 
@@ -235,7 +236,7 @@ int oa_tc6_set_protected_ctrl(struct oa_tc6 *tc6, bool prote)
 	return 0;
 }
 
-int oa_tc6_send_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
+int oa_tc6_send_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt, uint8_t tsc)
 {
 	uint16_t len = net_pkt_get_len(pkt);
 	uint8_t oa_tx[tc6->cps];
@@ -263,7 +264,7 @@ int oa_tc6_send_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 		      FIELD_PREP(OA_DATA_HDR_NORX, 1) | FIELD_PREP(OA_DATA_HDR_SWO, 0);
 
 		if (i == 1) {
-			hdr |= FIELD_PREP(OA_DATA_HDR_SV, 1);
+			hdr |= FIELD_PREP(OA_DATA_HDR_SV, 1) | FIELD_PREP(OA_DATA_HDR_TSC, tsc);
 		}
 
 		if (i == chunks) {
@@ -301,11 +302,14 @@ int oa_tc6_check_status(struct oa_tc6 *tc6)
 		/*
 		 * Just clear any pending interrupts.
 		 * The RESETC is handled separately as it requires per
-		 * device configuration.
+		 * device configuration. The transmit timestamp capture
+		 * available bits are cleared when the timestamps are read.
 		 */
 		if (oa_tc6_reg_read(tc6, OA_STATUS0, &sts) < 0) {
 			return -EIO;
 		}
+
+		sts &= ~(OA_STATUS0_TTSCAA | OA_STATUS0_TTSCAB | OA_STATUS0_TTSCAC);
 
 		if (sts != 0) {
 			oa_tc6_reg_write(tc6, OA_STATUS0, sts);
@@ -388,6 +392,26 @@ int oa_tc6_read_status(struct oa_tc6 *tc6, uint32_t *ftr)
 	return oa_tc6_chunk_spi_transfer(tc6, NULL, NULL, hdr, ftr);
 }
 
+/* Store the ingress timestamp added at the beginning of a frame */
+static void oa_tc6_rx_timestamp(struct net_pkt *pkt, const uint8_t *data, uint32_t ftr)
+{
+	struct net_ptp_time ts;
+	uint32_t sec = sys_get_be32(&data[0]);
+	uint32_t nsec = sys_get_be32(&data[sizeof(uint32_t)]);
+
+	/* RTSP is the odd parity bit calculated over the timestamp */
+	if (FIELD_GET(OA_DATA_FTR_RTSP, ftr) != oa_tc6_get_parity(sec ^ nsec)) {
+		LOG_DBG("OA RX: Timestamp parity error!");
+		return;
+	}
+
+	ts.second = sec;
+	ts.nanosecond = nsec & OA_TC6_TS_NS_MASK;
+
+	net_pkt_set_timestamp(pkt, &ts);
+	net_pkt_set_rx_timestamping(pkt, true);
+}
+
 int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 {
 	const uint16_t buf_rx_size = CONFIG_NET_BUF_DATA_SIZE;
@@ -395,6 +419,9 @@ int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 	uint32_t buf_rx_used = 0;
 	uint32_t hdr, ftr;
 	uint8_t sbo, ebo;
+	/* Bytes before the frame data in the current chunk */
+	uint8_t skip;
+	uint8_t *chunk;
 	int ret;
 
 	/*
@@ -422,7 +449,8 @@ int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 			}
 		}
 
-		ret = oa_tc6_chunk_spi_transfer(tc6, buf_rx->data + buf_rx_used, NULL, hdr, &ftr);
+		chunk = buf_rx->data + buf_rx_used;
+		ret = oa_tc6_chunk_spi_transfer(tc6, chunk, NULL, hdr, &ftr);
 		if (ret < 0) {
 			LOG_ERR("OA RX: transmission error: %d!", ret);
 			goto unref_buf;
@@ -446,17 +474,35 @@ int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 
 		sbo = FIELD_GET(OA_DATA_FTR_SWO, ftr) * sizeof(uint32_t);
 		ebo = FIELD_GET(OA_DATA_FTR_EBO, ftr) + 1;
+		skip = 0;
 
 		if (FIELD_GET(OA_DATA_FTR_SV, ftr)) {
 			/*
-			 * Adjust beginning of the buffer with SWO only when
+			 * Adjust beginning of the frame with SWO only when
 			 * we DO NOT have two frames concatenated together
 			 * in one chunk.
 			 */
 			if (!(FIELD_GET(OA_DATA_FTR_EV, ftr) && (ebo <= sbo))) {
-				if (sbo) {
-					net_buf_pull(buf_rx, sbo);
+				skip = sbo;
+			}
+
+			/*
+			 * The ingress timestamp precedes the frame. It is
+			 * always in the start chunk when the received frames
+			 * are zero aligned (OA_CONFIG0 RFA ZARFE).
+			 */
+			if (FIELD_GET(OA_DATA_FTR_RTSA, ftr) && (skip == sbo)) {
+				if (sbo + OA_TC6_TS_SIZE > tc6->cps) {
+					LOG_ERR("OA RX: Timestamp not in the start chunk!");
+					goto unref_buf;
 				}
+
+				oa_tc6_rx_timestamp(pkt, &chunk[sbo], ftr);
+				skip += OA_TC6_TS_SIZE;
+			}
+
+			if (skip > 0) {
+				memmove(chunk, &chunk[skip], tc6->cps - skip);
 			}
 		}
 
@@ -486,7 +532,7 @@ int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 			}
 
 			/* Set final size of the buffer */
-			buf_rx_used += ebo;
+			buf_rx_used += ebo - skip;
 			buf_rx->len = buf_rx_used;
 			net_pkt_append_buffer(pkt, buf_rx);
 			/*
@@ -495,7 +541,7 @@ int oa_tc6_read_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt)
 			 */
 			break;
 		} else {
-			buf_rx_used += tc6->cps;
+			buf_rx_used += tc6->cps - skip;
 			if ((buf_rx_size - buf_rx_used) < tc6->cps) {
 				net_pkt_append_buffer(pkt, buf_rx);
 				buf_rx->len = buf_rx_used;

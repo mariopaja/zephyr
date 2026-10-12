@@ -22,8 +22,13 @@
 #define OA_CONFIG0           MMS_REG(0x0, 0x004)
 #define OA_CONFIG0_SYNC      BIT(15)
 #define OA_CONFIG0_RFA_ZARFE BIT(12)
+#define OA_CONFIG0_FTSE      BIT(7)
+#define OA_CONFIG0_FTSS      BIT(6)
 #define OA_CONFIG0_PROTE     BIT(5)
 #define OA_STATUS0           MMS_REG(0x0, 0x008)
+#define OA_STATUS0_TTSCAC    BIT(10)
+#define OA_STATUS0_TTSCAB    BIT(9)
+#define OA_STATUS0_TTSCAA    BIT(8)
 #define OA_STATUS0_RESETC    BIT(6)
 #define OA_STATUS1           MMS_REG(0x0, 0x009)
 #define OA_BUFSTS            MMS_REG(0x0, 0x00B)
@@ -38,6 +43,8 @@
 #define OA_IMASK0_HDREM      BIT(5)
 #define OA_IMASK1            MMS_REG(0x0, 0x00D)
 #define OA_IMASK0_UV18M      BIT(19)
+#define OA_TTSCAH            MMS_REG(0x0, 0x010)
+#define OA_TTSCAL            MMS_REG(0x0, 0x011)
 
 /* OA Control header */
 #define OA_CTRL_HDR_DNC  BIT(31)
@@ -58,7 +65,12 @@
 #define OA_DATA_HDR_SWO  GENMASK(19, 16)
 #define OA_DATA_HDR_EV   BIT(14)
 #define OA_DATA_HDR_EBO  GENMASK(13, 8)
+#define OA_DATA_HDR_TSC  GENMASK(7, 6)
 #define OA_DATA_HDR_P    BIT(0)
+
+/* OA Data header TSC values */
+#define OA_DATA_HDR_TSC_NONE 0
+#define OA_DATA_HDR_TSC_A    1
 
 /* OA Data footer */
 #define OA_DATA_FTR_EXST BIT(31)
@@ -71,6 +83,8 @@
 #define OA_DATA_FTR_FD   BIT(15)
 #define OA_DATA_FTR_EV   BIT(14)
 #define OA_DATA_FTR_EBO  GENMASK(13, 8)
+#define OA_DATA_FTR_RTSA BIT(7)
+#define OA_DATA_FTR_RTSP BIT(6)
 #define OA_DATA_FTR_TXC  GENMASK(5, 1)
 #define OA_DATA_FTR_P    BIT(0)
 
@@ -79,6 +93,12 @@
 #define OA_TC6_BUF_ALLOC_TIMEOUT K_MSEC(10)
 #define OA_TC6_FTR_RCA_MAX       GENMASK(4, 0)
 #define OA_TC6_FTR_TXC_MAX       GENMASK(4, 0)
+
+/* Frame timestamps are used in the 64-bit format (OA_CONFIG0 FTSS set):
+ * 32 bits of seconds followed by 30 bits of nanoseconds.
+ */
+#define OA_TC6_TS_SIZE    8
+#define OA_TC6_TS_NS_MASK GENMASK(29, 0)
 
 /* PHY Clause 22 registers base address and mask */
 #define OA_TC6_PHY_STD_REG_ADDR_BASE 0xFF00
@@ -188,12 +208,18 @@ int oa_tc6_set_protected_ctrl(struct oa_tc6 *tc6, bool prote);
  *
  * @param pkt network packet to be send
  *
+ * @param tsc egress timestamp capture register (OA_DATA_HDR_TSC_*)
+ *
  * @return 0 if data send was successful, <0 otherwise.
  */
-int oa_tc6_send_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt);
+int oa_tc6_send_chunks(struct oa_tc6 *tc6, struct net_pkt *pkt, uint8_t tsc);
 
 /**
  * @brief Read data chunks from OA TC6 device
+ *
+ * When frame timestamping is enabled (OA_CONFIG0 FTSE and FTSS set), the
+ * ingress timestamp added by the device is removed from the frame and
+ * stored as the packet timestamp.
  *
  * @param tc6 OA TC6 specific data
  *

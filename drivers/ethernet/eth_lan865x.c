@@ -454,7 +454,7 @@ static int lan865x_port_send(const struct device *dev, struct net_pkt *pkt)
 	int ret;
 
 	k_sem_take(&ctx->tx_rx_sem, K_FOREVER);
-	ret = oa_tc6_send_chunks(tc6, pkt);
+	ret = oa_tc6_send_chunks(tc6, pkt, OA_DATA_HDR_TSC_NONE);
 
 	/* Check if rca > 0 during half-duplex TX transmission */
 	if (tc6->rca > 0) {
